@@ -5,6 +5,8 @@ use crate::llm::{LlmProvider, Message};
 use crate::tools::ToolRegistry;
 use colored::Colorize;
 
+const MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
+
 pub struct Agent {
     pub llm: Box<dyn LlmProvider>,
     pub tools: ToolRegistry,
@@ -121,6 +123,14 @@ impl Agent {
                     }
                 } else {
                     format!("Unknown tool: {}", tool_call.name)
+                };
+
+                let result = if result.len() > MAX_TOOL_OUTPUT_CHARS {
+                    let mut truncated = result[..MAX_TOOL_OUTPUT_CHARS].to_string();
+                    truncated.push_str("\n...[output truncated to 50KB]");
+                    truncated
+                } else {
+                    result
                 };
 
                 self.memory

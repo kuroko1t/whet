@@ -1,5 +1,9 @@
 use super::{Tool, ToolError};
 use serde_json::json;
+use std::time::Duration;
+use wait_timeout::ChildExt;
+
+const COMMAND_TIMEOUT_SECS: u64 = 120;
 
 pub struct ShellTool;
 
@@ -42,35 +46,67 @@ impl Tool for ShellTool {
             cmd.current_dir(dir);
         }
 
-        let output = cmd
-            .output()
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to execute command: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let timeout = Duration::from_secs(COMMAND_TIMEOUT_SECS);
+        match child.wait_timeout(timeout) {
+            Ok(Some(status)) => {
+                let stdout = child.stdout.take().map(|s| {
+                    use std::io::Read;
+                    let mut buf = Vec::new();
+                    let mut reader = s;
+                    let _ = reader.read_to_end(&mut buf);
+                    buf
+                }).unwrap_or_default();
+                let stderr = child.stderr.take().map(|s| {
+                    use std::io::Read;
+                    let mut buf = Vec::new();
+                    let mut reader = s;
+                    let _ = reader.read_to_end(&mut buf);
+                    buf
+                }).unwrap_or_default();
 
-        let mut result = String::new();
-        if !stdout.is_empty() {
-            result.push_str(&stdout);
-        }
-        if !stderr.is_empty() {
-            if !result.is_empty() {
-                result.push('\n');
+                let stdout_str = String::from_utf8_lossy(&stdout);
+                let stderr_str = String::from_utf8_lossy(&stderr);
+
+                let mut result = String::new();
+                if !stdout_str.is_empty() {
+                    result.push_str(&stdout_str);
+                }
+                if !stderr_str.is_empty() {
+                    if !result.is_empty() {
+                        result.push('\n');
+                    }
+                    result.push_str("[stderr] ");
+                    result.push_str(&stderr_str);
+                }
+
+                let exit_code = status.code().unwrap_or(-1);
+                if exit_code != 0 {
+                    if !result.is_empty() {
+                        result.push('\n');
+                    }
+                    result.push_str(&format!("[exit code: {}]", exit_code));
+                }
+
+                Ok(result)
             }
-            result.push_str("[stderr] ");
-            result.push_str(&stderr);
-        }
-
-        // Append exit code so the agent can distinguish success from failure
-        let exit_code = output.status.code().unwrap_or(-1);
-        if exit_code != 0 {
-            if !result.is_empty() {
-                result.push('\n');
+            Ok(None) => {
+                // Timeout — kill the process
+                let _ = child.kill();
+                let _ = child.wait();
+                Ok(format!("Command timed out after {} seconds", COMMAND_TIMEOUT_SECS))
             }
-            result.push_str(&format!("[exit code: {}]", exit_code));
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(ToolError::ExecutionFailed(format!("Failed to wait for command: {}", e)))
+            }
         }
-
-        Ok(result)
     }
 }
 

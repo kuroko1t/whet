@@ -2,6 +2,9 @@ use super::{Tool, ToolError};
 use crate::security::path::is_path_safe;
 use serde_json::json;
 
+const MAX_DEPTH: usize = 10;
+const MAX_ENTRIES: usize = 5000;
+
 pub struct ListDirTool;
 
 impl Tool for ListDirTool {
@@ -44,16 +47,41 @@ impl Tool for ListDirTool {
         }
 
         let mut entries = Vec::new();
-        list_entries(path, recursive, &mut entries)?;
+        let mut truncated = false;
+        list_entries(path, recursive, &mut entries, 0, &mut truncated)?;
+        if truncated {
+            entries.push("...[truncated]".to_string());
+        }
         Ok(entries.join("\n"))
     }
 }
 
-fn list_entries(path: &str, recursive: bool, entries: &mut Vec<String>) -> Result<(), ToolError> {
+fn list_entries(
+    path: &str,
+    recursive: bool,
+    entries: &mut Vec<String>,
+    depth: usize,
+    truncated: &mut bool,
+) -> Result<(), ToolError> {
+    if entries.len() >= MAX_ENTRIES {
+        *truncated = true;
+        return Ok(());
+    }
+
+    if recursive && depth >= MAX_DEPTH {
+        *truncated = true;
+        return Ok(());
+    }
+
     let dir = std::fs::read_dir(path)
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read '{}': {}", path, e)))?;
 
     for entry in dir {
+        if entries.len() >= MAX_ENTRIES {
+            *truncated = true;
+            return Ok(());
+        }
+
         let entry = entry
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read entry: {}", e)))?;
         let path_buf = entry.path();
@@ -62,7 +90,7 @@ fn list_entries(path: &str, recursive: bool, entries: &mut Vec<String>) -> Resul
         if path_buf.is_dir() {
             entries.push(format!("{}/", display));
             if recursive {
-                list_entries(&display, true, entries)?;
+                list_entries(&display, true, entries, depth + 1, truncated)?;
             }
         } else {
             entries.push(display);

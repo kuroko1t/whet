@@ -2,6 +2,8 @@ use super::{Tool, ToolError};
 use crate::security::path::is_path_safe;
 use serde_json::json;
 
+const MAX_FILE_SIZE: u64 = 10_000_000; // 10MB
+
 pub struct EditFileTool;
 
 impl Tool for EditFileTool {
@@ -49,6 +51,16 @@ impl Tool for EditFileTool {
             return Err(ToolError::PermissionDenied(format!(
                 "Access to '{}' is blocked for security",
                 path
+            )));
+        }
+
+        let file_size = std::fs::metadata(path)
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read '{}': {}", path, e)))?
+            .len();
+        if file_size > MAX_FILE_SIZE {
+            return Err(ToolError::ExecutionFailed(format!(
+                "File '{}' is too large ({} bytes, max {} bytes)",
+                path, file_size, MAX_FILE_SIZE
             )));
         }
 

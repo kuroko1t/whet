@@ -3,6 +3,9 @@ use super::protocol::{
 };
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct McpClient {
     child: Child,
@@ -114,7 +117,12 @@ impl McpClient {
             .map_err(|e| McpError::IoError(format!("Flush failed: {}", e)))?;
 
         // Read response lines until we get one with matching id
+        let start = Instant::now();
         loop {
+            if start.elapsed() > RESPONSE_TIMEOUT {
+                return Err(McpError::IoError("Server response timeout".to_string()));
+            }
+
             let mut line = String::new();
             let bytes_read = self
                 .reader

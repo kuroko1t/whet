@@ -19,3 +19,8 @@ toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
+wait-timeout = "0.2"
+
+[profile.release]
+lto = true
+strip = true

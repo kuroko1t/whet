@@ -8,6 +8,7 @@ pub struct RepoMapTool;
 
 const MAX_FILES: usize = 200;
 const MAX_OUTPUT_LINES: usize = 5000;
+const MAX_SYMBOL_FILE_SIZE: u64 = 1_000_000; // 1MB
 
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -154,6 +155,13 @@ fn extract_symbols(path: &Path) -> Vec<String> {
         Some(e) => e,
         None => return vec![],
     };
+
+    // Skip files larger than 1MB
+    if let Ok(metadata) = fs::metadata(path) {
+        if metadata.len() > MAX_SYMBOL_FILE_SIZE {
+            return vec![];
+        }
+    }
 
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
