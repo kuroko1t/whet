@@ -16,6 +16,7 @@ pub struct AgentConfig {
     pub model: String,
     pub max_iterations: usize,
     pub permission_mode: PermissionMode,
+    pub plan_mode: bool,
 }
 
 impl Default for AgentConfig {
@@ -24,6 +25,7 @@ impl Default for AgentConfig {
             model: "qwen2.5:7b".to_string(),
             max_iterations: 10,
             permission_mode: PermissionMode::Default,
+            plan_mode: false,
         }
     }
 }
@@ -67,7 +69,12 @@ impl Agent {
     ) -> String {
         self.memory.push(Message::user(user_input));
 
-        let tool_defs = self.tools.definitions();
+        let tool_defs = if self.config.plan_mode {
+            // In plan mode, only expose read-only (Safe) tools
+            self.tools.safe_definitions()
+        } else {
+            self.tools.definitions()
+        };
 
         for _iteration in 0..self.config.max_iterations {
             let response = match self.llm.chat_streaming(&self.memory, &tool_defs, on_token) {
@@ -94,8 +101,11 @@ impl Agent {
                 );
 
                 let result = if let Some(tool) = self.tools.get(&tool_call.name) {
-                    // Check if approval is needed
-                    if self.needs_approval(tool.risk_level()) {
+                    // In plan mode, block non-safe tools
+                    if self.config.plan_mode && tool.risk_level() != ToolRiskLevel::Safe {
+                        "Tool blocked: plan mode is active (read-only). Use /plan to toggle."
+                            .to_string()
+                    } else if self.needs_approval(tool.risk_level()) {
                         if !on_approve(&tool_call.name, &tool_call.arguments) {
                             "Tool execution denied by user.".to_string()
                         } else {
@@ -856,5 +866,120 @@ mod tests {
         );
         // Cleanup
         std::fs::remove_file("/tmp/hermitclaw_perm_test.txt").ok();
+    }
+
+    // --- Plan mode tests ---
+
+    #[test]
+    fn test_plan_mode_blocks_dangerous_tools() {
+        // shell is Dangerous → should be blocked in plan mode
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "shell".to_string(),
+                    arguments: serde_json::json!({"command": "rm -rf /"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Blocked.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig {
+                plan_mode: true,
+                ..AgentConfig::default()
+            },
+        );
+
+        let response = agent.process_message("Delete everything");
+        assert_eq!(response, "Blocked.");
+
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(tool_result.content.contains("plan mode"));
+    }
+
+    #[test]
+    fn test_plan_mode_blocks_moderate_tools() {
+        // write_file is Moderate → should be blocked in plan mode
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({"path": "/tmp/test.txt", "content": "x"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Can't write.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig {
+                plan_mode: true,
+                ..AgentConfig::default()
+            },
+        );
+
+        let response = agent.process_message("Write file");
+        assert_eq!(response, "Can't write.");
+
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(tool_result.content.contains("plan mode"));
+    }
+
+    #[test]
+    fn test_plan_mode_allows_safe_tools() {
+        // read_file is Safe → should work in plan mode
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "Cargo.toml"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Read successfully.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig {
+                plan_mode: true,
+                ..AgentConfig::default()
+            },
+        );
+
+        let response = agent.process_message("Read Cargo.toml");
+        assert_eq!(response, "Read successfully.");
+
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        // Should contain actual file content, not a "blocked" message
+        assert!(!tool_result.content.contains("plan mode"));
+        assert!(tool_result.content.contains("hermitclaw"));
     }
 }

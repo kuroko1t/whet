@@ -79,6 +79,19 @@ impl ToolRegistry {
             })
             .collect()
     }
+
+    /// Return only definitions for read-only (Safe) tools. Used in plan mode.
+    pub fn safe_definitions(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .iter()
+            .filter(|t| t.risk_level() == ToolRiskLevel::Safe)
+            .map(|t| ToolDefinition {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                parameters: t.parameters_schema(),
+            })
+            .collect()
+    }
 }
 
 impl Default for ToolRegistry {
@@ -233,6 +246,38 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), original_len, "Tool names should be unique");
+    }
+
+    #[test]
+    fn test_safe_definitions_only_safe_tools() {
+        use crate::config::ToolRiskLevel;
+        let registry = default_registry();
+        let safe_defs = registry.safe_definitions();
+
+        // Should only include Safe tools
+        for def in &safe_defs {
+            let tool = registry.get(&def.name).unwrap();
+            assert_eq!(
+                tool.risk_level(),
+                ToolRiskLevel::Safe,
+                "Tool '{}' should be Safe to appear in safe_definitions",
+                def.name
+            );
+        }
+
+        // Should not include write_file, edit_file, shell, git, apply_diff
+        let safe_names: Vec<&str> = safe_defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(!safe_names.contains(&"write_file"));
+        assert!(!safe_names.contains(&"edit_file"));
+        assert!(!safe_names.contains(&"shell"));
+        assert!(!safe_names.contains(&"git"));
+        assert!(!safe_names.contains(&"apply_diff"));
+
+        // Should include read_file, list_dir, grep, repo_map
+        assert!(safe_names.contains(&"read_file"));
+        assert!(safe_names.contains(&"list_dir"));
+        assert!(safe_names.contains(&"grep"));
+        assert!(safe_names.contains(&"repo_map"));
     }
 
     #[test]

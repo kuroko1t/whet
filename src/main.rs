@@ -159,6 +159,7 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
         model: model.clone(),
         max_iterations: cfg.agent.max_iterations,
         permission_mode: cfg.agent.permission_mode.clone(),
+        plan_mode: false,
     };
 
     let mut agent = Agent::new(provider, registry, agent_config);
@@ -365,12 +366,33 @@ fn handle_slash_command(
             }
             SlashResult::Handled
         }
+        "/plan" => {
+            agent.config.plan_mode = !agent.config.plan_mode;
+            if agent.config.plan_mode {
+                println!(
+                    "{} Plan mode {} - read-only tools only",
+                    ">>".green(),
+                    "ON".green().bold()
+                );
+            } else {
+                println!(
+                    "{} Plan mode {} - all tools available",
+                    ">>".yellow(),
+                    "OFF".yellow().bold()
+                );
+            }
+            SlashResult::Handled
+        }
         "/help" => {
             println!("{}", "Available commands:".bold());
             println!("  {} <name>  - Switch LLM model", "/model".cyan());
             println!(
                 "  {} <mode>  - Change permission mode (default/accept_edits/yolo)",
                 "/mode".cyan()
+            );
+            println!(
+                "  {}           - Toggle plan mode (read-only analysis)",
+                "/plan".cyan()
             );
             println!("  {}          - Clear conversation history", "/clear".cyan());
             println!("  {}           - Show this help", "/help".cyan());
