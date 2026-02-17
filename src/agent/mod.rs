@@ -14,7 +14,6 @@ pub struct Agent {
 pub struct AgentConfig {
     pub model: String,
     pub max_iterations: usize,
-    pub sandbox_enabled: bool,
 }
 
 impl Default for AgentConfig {
@@ -22,7 +21,6 @@ impl Default for AgentConfig {
         Self {
             model: "qwen2.5:7b".to_string(),
             max_iterations: 10,
-            sandbox_enabled: true,
         }
     }
 }
@@ -44,12 +42,20 @@ impl Agent {
     }
 
     pub fn process_message(&mut self, user_input: &str) -> String {
+        self.process_message_with_callback(user_input, &mut |_| {})
+    }
+
+    pub fn process_message_with_callback(
+        &mut self,
+        user_input: &str,
+        on_token: &mut dyn FnMut(&str),
+    ) -> String {
         self.memory.push(Message::user(user_input));
 
         let tool_defs = self.tools.definitions();
 
         for _iteration in 0..self.config.max_iterations {
-            let response = match self.llm.chat(&self.memory, &tool_defs) {
+            let response = match self.llm.chat_streaming(&self.memory, &tool_defs, on_token) {
                 Ok(resp) => resp,
                 Err(e) => return format!("Error: {}", e),
             };
@@ -394,5 +400,204 @@ mod tests {
             .filter(|m| m.role == Role::Assistant)
             .collect();
         assert!(assistant_messages.len() >= 2);
+    }
+
+    // --- Streaming callback tests ---
+
+    /// A mock LLM that implements chat_streaming with token-by-token callback
+    struct StreamingMockLlm {
+        responses: RefCell<Vec<(Vec<String>, LlmResponse)>>,
+    }
+
+    impl StreamingMockLlm {
+        /// Each entry: (tokens_to_emit, final_response)
+        fn new(responses: Vec<(Vec<String>, LlmResponse)>) -> Self {
+            let mut r = responses;
+            r.reverse();
+            Self {
+                responses: RefCell::new(r),
+            }
+        }
+    }
+
+    impl LlmProvider for StreamingMockLlm {
+        fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<LlmResponse, LlmError> {
+            let mut responses = self.responses.borrow_mut();
+            if let Some((_, resp)) = responses.pop() {
+                Ok(resp)
+            } else {
+                Ok(LlmResponse {
+                    content: Some("(no more responses)".to_string()),
+                    tool_calls: vec![],
+                })
+            }
+        }
+
+        fn chat_streaming(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            on_token: &mut dyn FnMut(&str),
+        ) -> Result<LlmResponse, LlmError> {
+            let mut responses = self.responses.borrow_mut();
+            if let Some((tokens, resp)) = responses.pop() {
+                for token in &tokens {
+                    on_token(token);
+                }
+                Ok(resp)
+            } else {
+                Ok(LlmResponse {
+                    content: Some("(no more responses)".to_string()),
+                    tool_calls: vec![],
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn test_process_message_with_callback_receives_tokens() {
+        let llm = StreamingMockLlm::new(vec![(
+            vec!["Hello".to_string(), " world".to_string(), "!".to_string()],
+            LlmResponse {
+                content: Some("Hello world!".to_string()),
+                tool_calls: vec![],
+            },
+        )]);
+
+        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default());
+
+        let mut received_tokens = Vec::new();
+        let response = agent.process_message_with_callback("Hi", &mut |token| {
+            received_tokens.push(token.to_string());
+        });
+
+        assert_eq!(response, "Hello world!");
+        assert_eq!(received_tokens, vec!["Hello", " world", "!"]);
+    }
+
+    #[test]
+    fn test_process_message_with_callback_empty_callback() {
+        // process_message uses an empty callback internally
+        let llm = StreamingMockLlm::new(vec![(
+            vec!["token1".to_string()],
+            LlmResponse {
+                content: Some("token1".to_string()),
+                tool_calls: vec![],
+            },
+        )]);
+
+        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default());
+        let response = agent.process_message("Hi");
+        assert_eq!(response, "token1");
+    }
+
+    #[test]
+    fn test_process_message_with_callback_tool_calls() {
+        // When tool calls happen, streaming callback should still work
+        let llm = StreamingMockLlm::new(vec![
+            (
+                vec![], // No tokens during tool call response
+                LlmResponse {
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: "call_0".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "Cargo.toml"}),
+                    }],
+                },
+            ),
+            (
+                vec!["The ".to_string(), "project".to_string(), ".".to_string()],
+                LlmResponse {
+                    content: Some("The project.".to_string()),
+                    tool_calls: vec![],
+                },
+            ),
+        ]);
+
+        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default());
+
+        let mut received_tokens = Vec::new();
+        let response = agent.process_message_with_callback("What project?", &mut |token| {
+            received_tokens.push(token.to_string());
+        });
+
+        assert_eq!(response, "The project.");
+        // Tokens should come from the second call (after tool execution)
+        assert_eq!(received_tokens, vec!["The ", "project", "."]);
+    }
+
+    #[test]
+    fn test_process_message_with_callback_error() {
+        let mut agent = make_agent(Box::new(ErrorLlm));
+
+        let mut received_tokens = Vec::new();
+        let response = agent.process_message_with_callback("Hello", &mut |token| {
+            received_tokens.push(token.to_string());
+        });
+
+        assert!(response.starts_with("Error:"));
+        // No tokens should be emitted on error
+        assert!(received_tokens.is_empty());
+    }
+
+    #[test]
+    fn test_process_message_with_callback_multiple_turns() {
+        let llm = StreamingMockLlm::new(vec![
+            (
+                vec!["First".to_string()],
+                LlmResponse {
+                    content: Some("First".to_string()),
+                    tool_calls: vec![],
+                },
+            ),
+            (
+                vec!["Second".to_string()],
+                LlmResponse {
+                    content: Some("Second".to_string()),
+                    tool_calls: vec![],
+                },
+            ),
+        ]);
+
+        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default());
+
+        let mut tokens1 = Vec::new();
+        let r1 = agent.process_message_with_callback("Q1", &mut |t| tokens1.push(t.to_string()));
+        assert_eq!(r1, "First");
+        assert_eq!(tokens1, vec!["First"]);
+
+        let mut tokens2 = Vec::new();
+        let r2 = agent.process_message_with_callback("Q2", &mut |t| tokens2.push(t.to_string()));
+        assert_eq!(r2, "Second");
+        assert_eq!(tokens2, vec!["Second"]);
+
+        // Memory should have system + user1 + assistant1 + user2 + assistant2 = 5
+        assert_eq!(agent.memory.len(), 5);
+    }
+
+    #[test]
+    fn test_process_message_delegates_to_callback_version() {
+        // process_message should produce the same result as process_message_with_callback
+        let llm1 = MockLlm::new(vec![LlmResponse {
+            content: Some("Same result".to_string()),
+            tool_calls: vec![],
+        }]);
+        let llm2 = MockLlm::new(vec![LlmResponse {
+            content: Some("Same result".to_string()),
+            tool_calls: vec![],
+        }]);
+
+        let mut agent1 = make_agent(Box::new(llm1));
+        let mut agent2 = make_agent(Box::new(llm2));
+
+        let r1 = agent1.process_message("test");
+        let r2 = agent2.process_message_with_callback("test", &mut |_| {});
+
+        assert_eq!(r1, r2);
     }
 }

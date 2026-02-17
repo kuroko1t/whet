@@ -1,5 +1,5 @@
-use super::{Tool, ToolError, ToolPermissions};
-use crate::sandbox::namespace::is_path_safe;
+use super::{Tool, ToolError};
+use crate::security::path::is_path_safe;
 use serde_json::json;
 
 pub struct ReadFileTool;
@@ -42,14 +42,6 @@ impl Tool for ReadFileTool {
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read '{}': {}", path, e)))
     }
 
-    fn permissions(&self) -> ToolPermissions {
-        ToolPermissions {
-            filesystem_read: true,
-            filesystem_write: false,
-            network: false,
-            subprocess: false,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -126,13 +118,4 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-    #[test]
-    fn test_read_permissions() {
-        let tool = ReadFileTool;
-        let perms = tool.permissions();
-        assert!(perms.filesystem_read);
-        assert!(!perms.filesystem_write);
-        assert!(!perms.network);
-        assert!(!perms.subprocess);
-    }
 }

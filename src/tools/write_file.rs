@@ -1,5 +1,5 @@
-use super::{Tool, ToolError, ToolPermissions};
-use crate::sandbox::namespace::is_path_safe;
+use super::{Tool, ToolError};
+use crate::security::path::is_path_safe;
 use serde_json::json;
 
 pub struct WriteFileTool;
@@ -51,14 +51,6 @@ impl Tool for WriteFileTool {
         Ok(format!("Successfully wrote to '{}'", path))
     }
 
-    fn permissions(&self) -> ToolPermissions {
-        ToolPermissions {
-            filesystem_read: true,
-            filesystem_write: true,
-            network: false,
-            subprocess: false,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -149,13 +141,4 @@ mod tests {
         fs::remove_file(path).ok();
     }
 
-    #[test]
-    fn test_write_permissions() {
-        let tool = WriteFileTool;
-        let perms = tool.permissions();
-        assert!(perms.filesystem_read);
-        assert!(perms.filesystem_write);
-        assert!(!perms.network);
-        assert!(!perms.subprocess);
-    }
 }

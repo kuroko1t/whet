@@ -1,5 +1,5 @@
-use super::{Tool, ToolError, ToolPermissions};
-use crate::sandbox::namespace::is_path_safe;
+use super::{Tool, ToolError};
+use crate::security::path::is_path_safe;
 use serde_json::json;
 
 pub struct ListDirTool;
@@ -48,14 +48,6 @@ impl Tool for ListDirTool {
         Ok(entries.join("\n"))
     }
 
-    fn permissions(&self) -> ToolPermissions {
-        ToolPermissions {
-            filesystem_read: true,
-            filesystem_write: false,
-            network: false,
-            subprocess: false,
-        }
-    }
 }
 
 fn list_entries(path: &str, recursive: bool, entries: &mut Vec<String>) -> Result<(), ToolError> {
@@ -171,13 +163,4 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_list_permissions() {
-        let tool = ListDirTool;
-        let perms = tool.permissions();
-        assert!(perms.filesystem_read);
-        assert!(!perms.filesystem_write);
-        assert!(!perms.network);
-        assert!(!perms.subprocess);
-    }
 }

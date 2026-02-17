@@ -8,10 +8,10 @@ The name "Hermit" represents isolation (offline) and protection (shell) — like
 
 Key differentiators vs OpenClaw/PicoClaw/ZeroClaw:
 - **Embedded local LLM inference** via Ollama (no cloud API needed)
-- **Sandboxed tool execution** via Linux namespaces (every tool runs isolated)
+- **Path safety checks** to block access to sensitive files
 - **Encrypted local memory** via SQLite + encryption
 - **Single binary** deployment
-- **Zero network by default**
+- **Zero network dependency** — all inference is local
 
 ## Your Role
 
@@ -41,7 +41,7 @@ IMPORTANT RULES:
 - Terminal UI: rustyline for readline, colored for terminal colors
 - Database: rusqlite with bundled feature
 - TOML config: toml crate
-- Sandbox: std::process::Command with `unshare` for Linux namespace isolation
+- Security: Path safety checks to block access to sensitive files
 - Async: Do NOT use async. Use blocking/synchronous code throughout for simplicity.
 
 ---
@@ -69,9 +69,9 @@ hermitclaw/
 │   │   ├── list_dir.rs
 │   │   ├── write_file.rs
 │   │   └── shell.rs     # Sandboxed shell command execution
-│   ├── sandbox/
-│   │   ├── mod.rs       # Sandbox trait + namespace implementation
-│   │   └── namespace.rs # Linux namespace sandbox via unshare
+│   ├── security/
+│   │   ├── mod.rs       # Security module
+│   │   └── path.rs      # Path safety checks
 │   ├── memory/
 │   │   ├── mod.rs       # Conversation memory
 │   │   └── store.rs     # SQLite storage
@@ -122,9 +122,6 @@ enum Commands {
         /// Ollama model to use
         #[arg(short, long, default_value = "qwen2.5:7b")]
         model: String,
-        /// Disable sandbox for tool execution
-        #[arg(long)]
-        no_sandbox: bool,
     },
     /// List available tools
     Tools,
@@ -220,14 +217,6 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> serde_json::Value;
     fn execute(&self, args: serde_json::Value) -> Result<String, ToolError>;
-    fn permissions(&self) -> ToolPermissions;
-}
-
-pub struct ToolPermissions {
-    pub filesystem_read: bool,
-    pub filesystem_write: bool,
-    pub network: bool,
-    pub subprocess: bool,
 }
 
 pub struct ToolRegistry {
@@ -288,7 +277,6 @@ pub struct Agent {
 pub struct AgentConfig {
     pub model: String,
     pub max_iterations: usize,  // Max tool-calling rounds per user message (default: 10)
-    pub sandbox_enabled: bool,
 }
 ```
 
@@ -333,79 +321,27 @@ For the `Chat` command:
 
 ---
 
-## Phase 5: Sandbox
+## Phase 5: Path Security
 
-**Goal**: Execute tool commands in an isolated Linux namespace.
+**Goal**: Protect sensitive files from being accessed by tools.
 
-### Sandbox Trait (src/sandbox/mod.rs):
+### Path Safety (src/security/path.rs):
 ```rust
-pub trait Sandbox {
-    fn execute(&self, command: &str, permissions: &ToolPermissions, working_dir: Option<&str>) -> Result<SandboxResult, SandboxError>;
-}
-
-pub struct SandboxResult {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-}
-
-pub enum SandboxError {
-    PermissionDenied(String),
-    ExecutionFailed(String),
-    Timeout,
-}
-```
-
-### Namespace Sandbox (src/sandbox/namespace.rs):
-Use `unshare` command to create isolated execution:
-
-```rust
-fn execute(&self, command: &str, permissions: &ToolPermissions, working_dir: Option<&str>) -> Result<SandboxResult, SandboxError> {
-    let mut cmd = std::process::Command::new("unshare");
-
-    // Network isolation: --net creates a new (empty) network namespace
-    if !permissions.network {
-        cmd.arg("--net");
-    }
-
-    // Mount namespace for filesystem isolation
-    cmd.arg("--mount");
-
-    // Run the actual command
-    cmd.args(["--", "sh", "-c", command]);
-
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    // Set timeout
-    // Use std::process with wait_timeout pattern or spawned thread
-    // Kill after 30 seconds
-
-    // Capture output
-    let output = cmd.output()?;
-    Ok(SandboxResult { ... })
+pub fn is_path_safe(path: &str) -> bool {
+    // Block access to sensitive paths: /etc/shadow, /etc/gshadow, /etc/sudoers
+    // Block access to sensitive directories: ~/.ssh, ~/.gnupg, ~/.aws
+    // Allow all other paths
 }
 ```
 
 ### Integration:
-- The `shell` tool should use Sandbox for execution when sandbox is enabled
-- Other tools (read_file, write_file, list_dir) restrict paths:
-  - Deny access to paths outside the current working directory
-  - Deny access to dotfiles and hidden directories (except explicitly allowed)
-  - Deny access to sensitive paths: /etc/shadow, /etc/passwd, ~/.ssh, etc.
-- Add `--no-sandbox` flag to CLI for development/testing
-
-### NoOp Sandbox:
-Also implement a `NoOpSandbox` that just runs commands directly (for when sandbox is disabled).
+- File tools (read_file, write_file, list_dir) check `is_path_safe()` before accessing paths
+- Deny access to sensitive system files and credential directories
 
 **Completion criteria**:
 - [ ] `cargo build` succeeds
-- [ ] Shell tool runs commands inside namespace when sandbox enabled
-- [ ] Network is blocked by default in sandboxed execution
 - [ ] Path restrictions prevent access to sensitive files
-- [ ] `--no-sandbox` flag disables sandboxing
-- [ ] Unit test: sandboxed command cannot access network
+- [ ] Unit tests for path safety pass
 
 ---
 
@@ -447,7 +383,6 @@ base_url = "http://localhost:11434"
 
 [agent]
 max_iterations = 10
-sandbox = true
 
 [memory]
 database_path = "~/.hermitclaw/memory.db"
@@ -477,7 +412,6 @@ database_path = "~/.hermitclaw/memory.db"
 - Provide helpful error messages:
   - "Ollama is not running. Start it with: ollama serve"
   - "Model 'xxx' not found. Pull it with: ollama pull xxx"
-  - "Sandbox requires Linux. Use --no-sandbox on other platforms."
 
 ### UX Improvements:
 - Show a startup banner with version info

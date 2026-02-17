@@ -1,4 +1,4 @@
-use super::{Tool, ToolError, ToolPermissions};
+use super::{Tool, ToolError};
 use serde_json::json;
 
 pub struct ShellTool;
@@ -9,7 +9,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command (sandboxed when sandbox is enabled)"
+        "Execute a shell command"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -64,14 +64,6 @@ impl Tool for ShellTool {
         Ok(result)
     }
 
-    fn permissions(&self) -> ToolPermissions {
-        ToolPermissions {
-            filesystem_read: false,
-            filesystem_write: false,
-            network: false,
-            subprocess: true,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -150,13 +142,4 @@ mod tests {
         assert_eq!(lines.len(), 3);
     }
 
-    #[test]
-    fn test_shell_permissions() {
-        let tool = ShellTool;
-        let perms = tool.permissions();
-        assert!(perms.subprocess);
-        assert!(!perms.filesystem_read);
-        assert!(!perms.filesystem_write);
-        assert!(!perms.network);
-    }
 }
