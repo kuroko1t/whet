@@ -54,6 +54,8 @@ struct OllamaFunctionDef {
 #[derive(Deserialize, Debug)]
 struct OllamaChatResponse {
     message: OllamaMessage,
+    #[serde(default)]
+    done: Option<bool>,
 }
 
 // --- Implementation ---
@@ -183,6 +185,107 @@ impl LlmProvider for OllamaClient {
             None
         } else {
             Some(resp_body.message.content)
+        };
+
+        Ok(LlmResponse {
+            content,
+            tool_calls,
+        })
+    }
+
+    fn chat_streaming(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        on_token: &mut dyn FnMut(&str),
+    ) -> Result<LlmResponse, LlmError> {
+        let url = format!("{}/api/chat", self.base_url);
+
+        let request = OllamaChatRequest {
+            model: self.model.clone(),
+            messages: Self::convert_messages(messages),
+            stream: true,
+            tools: Self::convert_tools(tools),
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .map_err(|e| {
+                if e.is_connect() {
+                    LlmError::ConnectionError(
+                        "Cannot connect to Ollama. Is it running? Start with: ollama serve"
+                            .to_string(),
+                    )
+                } else if e.is_timeout() {
+                    LlmError::RequestError("Request timed out".to_string())
+                } else {
+                    LlmError::RequestError(e.to_string())
+                }
+            })?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(LlmError::ModelNotFound(format!(
+                "Model '{}' not found. Pull it with: ollama pull {}",
+                self.model, self.model
+            )));
+        }
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(LlmError::RequestError(format!(
+                "Ollama returned status {}: {}",
+                status, body
+            )));
+        }
+
+        let reader = std::io::BufReader::new(response);
+        let mut accumulated_content = String::new();
+        let mut tool_calls = Vec::new();
+
+        use std::io::BufRead;
+        for line_result in reader.lines() {
+            let line = line_result
+                .map_err(|e| LlmError::ParseError(format!("Failed to read stream: {}", e)))?;
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let chunk: OllamaChatResponse = serde_json::from_str(&line).map_err(|e| {
+                LlmError::ParseError(format!("Failed to parse streaming chunk: {}", e))
+            })?;
+
+            // Emit content tokens
+            if !chunk.message.content.is_empty() {
+                on_token(&chunk.message.content);
+                accumulated_content.push_str(&chunk.message.content);
+            }
+
+            // Collect tool calls from the final chunk
+            if let Some(tcs) = chunk.message.tool_calls {
+                let base_idx = tool_calls.len();
+                for (i, tc) in tcs.into_iter().enumerate() {
+                    tool_calls.push(ToolCall {
+                        id: format!("call_{}", base_idx + i),
+                        name: tc.function.name,
+                        arguments: tc.function.arguments,
+                    });
+                }
+            }
+
+            // Check if streaming is done
+            if chunk.done.unwrap_or(false) {
+                break;
+            }
+        }
+
+        let content = if accumulated_content.is_empty() {
+            None
+        } else {
+            Some(accumulated_content)
         };
 
         Ok(LlmResponse {
@@ -501,5 +604,151 @@ mod tests {
         let client = OllamaClient::new("http://localhost:11434", "test-model");
         assert_eq!(client.base_url, "http://localhost:11434");
         assert_eq!(client.model, "test-model");
+    }
+
+    // --- Streaming response chunk parsing tests ---
+
+    #[test]
+    fn test_streaming_chunk_parse_content() {
+        let chunk_json = json!({
+            "message": {"role": "assistant", "content": "Hello"},
+            "done": false
+        });
+        let chunk: OllamaChatResponse = serde_json::from_value(chunk_json).unwrap();
+        assert_eq!(chunk.message.content, "Hello");
+        assert_eq!(chunk.done, Some(false));
+        assert!(chunk.message.tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_streaming_chunk_parse_done() {
+        let chunk_json = json!({
+            "message": {"role": "assistant", "content": ""},
+            "done": true
+        });
+        let chunk: OllamaChatResponse = serde_json::from_value(chunk_json).unwrap();
+        assert_eq!(chunk.done, Some(true));
+    }
+
+    #[test]
+    fn test_streaming_chunk_parse_no_done_field() {
+        // Some chunks might not have the 'done' field at all
+        let chunk_json = json!({
+            "message": {"role": "assistant", "content": "partial"}
+        });
+        let chunk: OllamaChatResponse = serde_json::from_value(chunk_json).unwrap();
+        assert_eq!(chunk.done, None);
+        assert_eq!(chunk.message.content, "partial");
+    }
+
+    #[test]
+    fn test_streaming_chunk_with_tool_calls() {
+        let chunk_json = json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "read_file",
+                        "arguments": {"path": "/tmp/test.txt"}
+                    }
+                }]
+            },
+            "done": true
+        });
+        let chunk: OllamaChatResponse = serde_json::from_value(chunk_json).unwrap();
+        assert_eq!(chunk.done, Some(true));
+        let tcs = chunk.message.tool_calls.unwrap();
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].function.name, "read_file");
+    }
+
+    #[test]
+    fn test_streaming_content_accumulation_simulation() {
+        // Simulate what chat_streaming does: accumulate content from chunks
+        let chunks = vec![
+            json!({"message": {"role": "assistant", "content": "Hello"}, "done": false}),
+            json!({"message": {"role": "assistant", "content": " world"}, "done": false}),
+            json!({"message": {"role": "assistant", "content": "!"}, "done": false}),
+            json!({"message": {"role": "assistant", "content": ""}, "done": true}),
+        ];
+
+        let mut accumulated = String::new();
+        let mut callback_tokens = Vec::new();
+        let mut final_done = false;
+
+        for chunk_json in chunks {
+            let chunk: OllamaChatResponse = serde_json::from_value(chunk_json).unwrap();
+            if !chunk.message.content.is_empty() {
+                callback_tokens.push(chunk.message.content.clone());
+                accumulated.push_str(&chunk.message.content);
+            }
+            if chunk.done == Some(true) {
+                final_done = true;
+                break;
+            }
+        }
+
+        assert!(final_done);
+        assert_eq!(accumulated, "Hello world!");
+        assert_eq!(callback_tokens, vec!["Hello", " world", "!"]);
+    }
+
+    #[test]
+    fn test_streaming_empty_lines_skipped() {
+        // In streaming, empty lines should be skipped
+        let lines = vec!["", "  ", "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":true}"];
+        let mut found_content = false;
+
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let chunk: OllamaChatResponse = serde_json::from_str(line).unwrap();
+            if !chunk.message.content.is_empty() {
+                found_content = true;
+            }
+        }
+        assert!(found_content);
+    }
+
+    #[test]
+    fn test_streaming_tool_calls_accumulated() {
+        // Simulate accumulating tool calls from streaming chunks
+        let chunks = vec![
+            json!({"message": {"role": "assistant", "content": ""}, "done": false}),
+            json!({
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"function": {"name": "read_file", "arguments": {"path": "a.txt"}}},
+                        {"function": {"name": "list_dir", "arguments": {"path": "."}}}
+                    ]
+                },
+                "done": true
+            }),
+        ];
+
+        let mut tool_calls = Vec::new();
+        for chunk_json in chunks {
+            let chunk: OllamaChatResponse = serde_json::from_value(chunk_json).unwrap();
+            if let Some(tcs) = chunk.message.tool_calls {
+                let base_idx = tool_calls.len();
+                for (i, tc) in tcs.into_iter().enumerate() {
+                    tool_calls.push(ToolCall {
+                        id: format!("call_{}", base_idx + i),
+                        name: tc.function.name,
+                        arguments: tc.function.arguments,
+                    });
+                }
+            }
+        }
+
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].name, "read_file");
+        assert_eq!(tool_calls[0].id, "call_0");
+        assert_eq!(tool_calls[1].name, "list_dir");
+        assert_eq!(tool_calls[1].id, "call_1");
     }
 }
