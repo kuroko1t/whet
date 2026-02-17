@@ -122,9 +122,7 @@ impl McpClient {
                 .map_err(|e| McpError::IoError(format!("Read failed: {}", e)))?;
 
             if bytes_read == 0 {
-                return Err(McpError::IoError(
-                    "Server closed connection".to_string(),
-                ));
+                return Err(McpError::IoError("Server closed connection".to_string()));
             }
 
             let line = line.trim();
@@ -174,9 +172,9 @@ impl McpClient {
             )));
         }
 
-        let result = response
-            .result
-            .ok_or_else(|| McpError::ProtocolError("No result in tools/list response".to_string()))?;
+        let result = response.result.ok_or_else(|| {
+            McpError::ProtocolError("No result in tools/list response".to_string())
+        })?;
 
         let tools_value = result
             .get("tools")
@@ -208,9 +206,9 @@ impl McpClient {
             )));
         }
 
-        let result = response
-            .result
-            .ok_or_else(|| McpError::ProtocolError("No result in tools/call response".to_string()))?;
+        let result = response.result.ok_or_else(|| {
+            McpError::ProtocolError("No result in tools/call response".to_string())
+        })?;
 
         let call_result: McpToolCallResult = serde_json::from_value(result)
             .map_err(|e| McpError::ProtocolError(format!("Failed to parse call result: {}", e)))?;
@@ -313,9 +311,8 @@ for line in sys.stdin:
     fn create_mock_mcp_server() -> Result<McpClient, McpError> {
         let script = mock_mcp_script();
         let script_path = "/tmp/hermitclaw_mock_mcp.py";
-        std::fs::write(script_path, &script).map_err(|e| {
-            McpError::SpawnFailed(format!("Failed to write mock script: {}", e))
-        })?;
+        std::fs::write(script_path, &script)
+            .map_err(|e| McpError::SpawnFailed(format!("Failed to write mock script: {}", e)))?;
         McpClient::new("mock_server", "python3", &[script_path.to_string()])
     }
 
@@ -329,7 +326,6 @@ for line in sys.stdin:
             Err(McpError::SpawnFailed(msg)) if msg.contains("python3") => {
                 // python3 not available, skip test
                 eprintln!("Skipping: python3 not available");
-                return;
             }
             Err(e) => panic!("Unexpected error: {}", e),
         }
@@ -348,7 +344,10 @@ for line in sys.stdin:
         let tools = client.list_tools().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo_tool");
-        assert_eq!(tools[0].description, Some("Echo back the input".to_string()));
+        assert_eq!(
+            tools[0].description,
+            Some("Echo back the input".to_string())
+        );
         assert!(tools[0].input_schema.is_some());
     }
 

@@ -180,7 +180,10 @@ mod tests {
         let result: McpToolCallResult = serde_json::from_value(json_val).unwrap();
         assert!(!result.is_error);
         assert_eq!(result.content.len(), 1);
-        assert_eq!(result.content[0].text, Some("file contents here".to_string()));
+        assert_eq!(
+            result.content[0].text,
+            Some("file contents here".to_string())
+        );
     }
 
     #[test]
@@ -213,7 +216,10 @@ mod tests {
         let req = JsonRpcRequest::new(1, "tools/call", Some(params.clone()));
         let json_str = serde_json::to_string(&req).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(parsed["params"]["arguments"]["options"]["encoding"], "utf-8");
+        assert_eq!(
+            parsed["params"]["arguments"]["options"]["encoding"],
+            "utf-8"
+        );
     }
 
     #[test]
@@ -294,8 +300,7 @@ mod tests {
             ]
         });
 
-        let tools: Vec<McpToolInfo> =
-            serde_json::from_value(tools_json["tools"].clone()).unwrap();
+        let tools: Vec<McpToolInfo> = serde_json::from_value(tools_json["tools"].clone()).unwrap();
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].name, "read_file");
         assert_eq!(tools[1].name, "write_file");

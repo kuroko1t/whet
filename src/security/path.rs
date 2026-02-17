@@ -51,9 +51,7 @@ pub fn is_path_safe(path: &str) -> bool {
         "/etc/sudoers",
         "/etc/sudoers.d",
     ];
-    let sensitive_prefixes_system = [
-        "/etc/sudoers.d/",
-    ];
+    let sensitive_prefixes_system = ["/etc/sudoers.d/"];
     let sensitive_prefixes_home = [
         ".ssh",
         ".gnupg",

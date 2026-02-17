@@ -77,7 +77,10 @@ impl Tool for GrepTool {
             let truncated = results.len() >= MAX_RESULTS;
             let mut output = results.join("\n");
             if truncated {
-                output.push_str(&format!("\n\n(Results truncated at {} matches)", MAX_RESULTS));
+                output.push_str(&format!(
+                    "\n\n(Results truncated at {} matches)",
+                    MAX_RESULTS
+                ));
             }
             Ok(output)
         }
@@ -219,7 +222,9 @@ mod tests {
     fn test_grep_case_insensitive() {
         let tool = GrepTool;
         let result = tool
-            .execute(json!({"pattern": "HERMITCLAW", "path": "Cargo.toml", "case_insensitive": true}))
+            .execute(
+                json!({"pattern": "HERMITCLAW", "path": "Cargo.toml", "case_insensitive": true}),
+            )
             .unwrap();
         assert!(result.contains("hermitclaw"));
     }
@@ -228,7 +233,9 @@ mod tests {
     fn test_grep_case_sensitive_no_match() {
         let tool = GrepTool;
         let result = tool
-            .execute(json!({"pattern": "HERMITCLAW", "path": "Cargo.toml", "case_insensitive": false}))
+            .execute(
+                json!({"pattern": "HERMITCLAW", "path": "Cargo.toml", "case_insensitive": false}),
+            )
             .unwrap();
         assert_eq!(result, "No matches found.");
     }
@@ -246,7 +253,10 @@ mod tests {
         let tool = GrepTool;
         let result = tool.execute(json!({"path": "src"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[test]
@@ -370,7 +380,10 @@ mod tests {
         let tool = GrepTool;
         let result = tool.execute(json!({"pattern": "test", "path": "/etc/shadow"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]

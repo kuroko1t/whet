@@ -45,12 +45,12 @@ impl Tool for WriteFileTool {
             )));
         }
 
-        std::fs::write(path, content)
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write '{}': {}", path, e)))?;
+        std::fs::write(path, content).map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to write '{}': {}", path, e))
+        })?;
 
         Ok(format!("Successfully wrote to '{}'", path))
     }
-
 }
 
 #[cfg(test)]
@@ -106,7 +106,10 @@ mod tests {
         let tool = WriteFileTool;
         let result = tool.execute(json!({"content": "hello"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[test]
@@ -114,7 +117,10 @@ mod tests {
         let tool = WriteFileTool;
         let result = tool.execute(json!({"path": "/tmp/test.txt"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[test]
@@ -133,7 +139,10 @@ mod tests {
         let tool = WriteFileTool;
         let result = tool.execute(json!({"path": "/tmp/../etc/shadow", "content": "bad"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -141,7 +150,10 @@ mod tests {
         let tool = WriteFileTool;
         let result = tool.execute(json!({"path": "~/.ssh/id_rsa", "content": "bad"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -156,5 +168,4 @@ mod tests {
 
         fs::remove_file(path).ok();
     }
-
 }

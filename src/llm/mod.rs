@@ -72,7 +72,8 @@ impl fmt::Display for LlmError {
 impl std::error::Error for LlmError {}
 
 pub trait LlmProvider {
-    fn chat(&self, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse, LlmError>;
+    fn chat(&self, messages: &[Message], tools: &[ToolDefinition])
+        -> Result<LlmResponse, LlmError>;
 
     /// Streaming variant that calls on_token for each token as it arrives.
     /// Default implementation falls back to non-streaming chat.

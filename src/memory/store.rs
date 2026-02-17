@@ -20,7 +20,11 @@ impl MemoryStore {
         // Create parent directory if needed
         if let Some(parent) = std::path::Path::new(&expanded).parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("Warning: Failed to create directory {}: {}", parent.display(), e);
+                eprintln!(
+                    "Warning: Failed to create directory {}: {}",
+                    parent.display(),
+                    e
+                );
             }
         }
 
@@ -261,9 +265,7 @@ mod tests {
         store.create_conversation("newer").unwrap();
 
         // Save message to "older" to make it the most recently updated
-        store
-            .save_message("older", "user", "update", None)
-            .unwrap();
+        store.save_message("older", "user", "update", None).unwrap();
 
         let latest = store.get_latest_conversation_id().unwrap().unwrap();
         assert_eq!(latest, "older");

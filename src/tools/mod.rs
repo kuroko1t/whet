@@ -64,7 +64,10 @@ impl ToolRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.iter().find(|t| t.name() == name).map(|t| t.as_ref())
+        self.tools
+            .iter()
+            .find(|t| t.name() == name)
+            .map(|t| t.as_ref())
     }
 
     pub fn list(&self) -> Vec<&dyn Tool> {
@@ -231,9 +234,14 @@ mod tests {
         let registry = default_registry();
         for tool in registry.list() {
             let schema = tool.parameters_schema();
-            assert!(schema.is_object(), "Tool '{}' schema should be an object", tool.name());
+            assert!(
+                schema.is_object(),
+                "Tool '{}' schema should be an object",
+                tool.name()
+            );
             assert_eq!(
-                schema["type"], "object",
+                schema["type"],
+                "object",
                 "Tool '{}' schema type should be 'object'",
                 tool.name()
             );
@@ -294,16 +302,43 @@ mod tests {
 
         let registry = default_registry();
         // Safe tools
-        assert_eq!(registry.get("read_file").unwrap().risk_level(), ToolRiskLevel::Safe);
-        assert_eq!(registry.get("list_dir").unwrap().risk_level(), ToolRiskLevel::Safe);
-        assert_eq!(registry.get("grep").unwrap().risk_level(), ToolRiskLevel::Safe);
-        assert_eq!(registry.get("repo_map").unwrap().risk_level(), ToolRiskLevel::Safe);
+        assert_eq!(
+            registry.get("read_file").unwrap().risk_level(),
+            ToolRiskLevel::Safe
+        );
+        assert_eq!(
+            registry.get("list_dir").unwrap().risk_level(),
+            ToolRiskLevel::Safe
+        );
+        assert_eq!(
+            registry.get("grep").unwrap().risk_level(),
+            ToolRiskLevel::Safe
+        );
+        assert_eq!(
+            registry.get("repo_map").unwrap().risk_level(),
+            ToolRiskLevel::Safe
+        );
         // Moderate tools
-        assert_eq!(registry.get("write_file").unwrap().risk_level(), ToolRiskLevel::Moderate);
-        assert_eq!(registry.get("edit_file").unwrap().risk_level(), ToolRiskLevel::Moderate);
-        assert_eq!(registry.get("apply_diff").unwrap().risk_level(), ToolRiskLevel::Moderate);
+        assert_eq!(
+            registry.get("write_file").unwrap().risk_level(),
+            ToolRiskLevel::Moderate
+        );
+        assert_eq!(
+            registry.get("edit_file").unwrap().risk_level(),
+            ToolRiskLevel::Moderate
+        );
+        assert_eq!(
+            registry.get("apply_diff").unwrap().risk_level(),
+            ToolRiskLevel::Moderate
+        );
         // Dangerous tools
-        assert_eq!(registry.get("shell").unwrap().risk_level(), ToolRiskLevel::Dangerous);
-        assert_eq!(registry.get("git").unwrap().risk_level(), ToolRiskLevel::Dangerous);
+        assert_eq!(
+            registry.get("shell").unwrap().risk_level(),
+            ToolRiskLevel::Dangerous
+        );
+        assert_eq!(
+            registry.get("git").unwrap().risk_level(),
+            ToolRiskLevel::Dangerous
+        );
     }
 }

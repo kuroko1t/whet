@@ -58,11 +58,7 @@ fn ask_approval(tool_name: &str, args: &serde_json::Value) -> bool {
     use std::io::{self, Write};
     eprintln!(
         "\n{}",
-        format!(
-            "  Tool '{}' wants to execute:",
-            tool_name
-        )
-        .yellow()
+        format!("  Tool '{}' wants to execute:", tool_name).yellow()
     );
     // Show a compact summary of the arguments
     match tool_name {
@@ -109,10 +105,7 @@ fn ask_approval(tool_name: &str, args: &serde_json::Value) -> bool {
             eprintln!("    args: {}", args.to_string().dimmed());
         }
     }
-    eprint!(
-        "  {} ",
-        "Allow? [y/N/a(lways)]".bright_yellow()
-    );
+    eprint!("  {} ", "Allow? [y/N/a(lways)]".bright_yellow());
     io::stderr().flush().ok();
 
     let mut input = String::new();
@@ -193,9 +186,7 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
                         for (role, content, _tool_call_id) in &messages {
                             match role.as_str() {
                                 "user" => agent.memory.push(llm::Message::user(content)),
-                                "assistant" => {
-                                    agent.memory.push(llm::Message::assistant(content))
-                                }
+                                "assistant" => agent.memory.push(llm::Message::assistant(content)),
                                 _ => {}
                             }
                         }
@@ -210,7 +201,11 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
                     println!("No previous conversation found. Starting new.\n");
                     let id = uuid::Uuid::new_v4().to_string();
                     if let Err(e) = store.create_conversation(&id) {
-                        eprintln!("{} Failed to create conversation: {}", "Warning:".yellow(), e);
+                        eprintln!(
+                            "{} Failed to create conversation: {}",
+                            "Warning:".yellow(),
+                            e
+                        );
                     }
                     id
                 }
@@ -222,7 +217,11 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
         let id = uuid::Uuid::new_v4().to_string();
         if let Some(ref store) = store {
             if let Err(e) = store.create_conversation(&id) {
-                eprintln!("{} Failed to create conversation: {}", "Warning:".yellow(), e);
+                eprintln!(
+                    "{} Failed to create conversation: {}",
+                    "Warning:".yellow(),
+                    e
+                );
             }
         }
         id
@@ -232,11 +231,7 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
     let mut rl = match rustyline::DefaultEditor::new() {
         Ok(editor) => editor,
         Err(e) => {
-            eprintln!(
-                "{} Failed to initialize readline: {}",
-                "Error:".red(),
-                e
-            );
+            eprintln!("{} Failed to initialize readline: {}", "Error:".red(), e);
             return;
         }
     };
@@ -300,7 +295,9 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
 
                 // Save assistant response
                 if let Some(ref store) = store {
-                    if let Err(e) = store.save_message(&conversation_id, "assistant", &response, None) {
+                    if let Err(e) =
+                        store.save_message(&conversation_id, "assistant", &response, None)
+                    {
                         eprintln!("{} Failed to save message: {}", "Warning:".yellow(), e);
                     }
                 }
@@ -340,10 +337,7 @@ fn handle_slash_command(
         "/model" => {
             if arg.is_empty() {
                 println!("Current model: {}", current_model.green());
-                println!(
-                    "Usage: {} <model_name>",
-                    "/model".cyan()
-                );
+                println!("Usage: {} <model_name>", "/model".cyan());
             } else {
                 let new_model = arg.to_string();
                 println!(
@@ -421,7 +415,10 @@ fn handle_slash_command(
                 "  {} [cmd]   - Run test-fix loop (default: cargo test)",
                 "/test".cyan()
             );
-            println!("  {}          - Clear conversation history", "/clear".cyan());
+            println!(
+                "  {}          - Clear conversation history",
+                "/clear".cyan()
+            );
             println!("  {}           - Show this help", "/help".cyan());
             println!("  {}           - Exit", "Ctrl+D".dimmed());
             SlashResult::Handled
@@ -487,7 +484,10 @@ fn run_test_fix_loop(agent: &mut Agent, test_cmd: &str, cfg: &Config) {
         // Truncate output if too long
         let max_output = 4000;
         let failure_output = if combined.len() > max_output {
-            format!("...(truncated)\n{}", &combined[combined.len() - max_output..])
+            format!(
+                "...(truncated)\n{}",
+                &combined[combined.len() - max_output..]
+            )
         } else {
             combined.to_string()
         };

@@ -41,7 +41,6 @@ impl Tool for ReadFileTool {
         std::fs::read_to_string(path)
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read '{}': {}", path, e)))
     }
-
 }
 
 #[cfg(test)]
@@ -69,7 +68,10 @@ mod tests {
         let tool = ReadFileTool;
         let result = tool.execute(json!({"path": "/etc/shadow"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -77,7 +79,10 @@ mod tests {
         let tool = ReadFileTool;
         let result = tool.execute(json!({"path": "/etc/gshadow"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -85,7 +90,10 @@ mod tests {
         let tool = ReadFileTool;
         let result = tool.execute(json!({"path": "/etc/sudoers"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -93,7 +101,10 @@ mod tests {
         let tool = ReadFileTool;
         let result = tool.execute(json!({}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[test]
@@ -110,7 +121,10 @@ mod tests {
         // Attempt to reach /etc/shadow via path traversal
         let result = tool.execute(json!({"path": "/tmp/../etc/shadow"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -118,7 +132,10 @@ mod tests {
         let tool = ReadFileTool;
         let result = tool.execute(json!({"path": "/tmp/../../etc/shadow"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -128,7 +145,10 @@ mod tests {
             let path = format!("{}/.ssh/id_rsa", home.display());
             let result = tool.execute(json!({"path": path}));
             assert!(result.is_err());
-            assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+            assert!(matches!(
+                result.unwrap_err(),
+                ToolError::PermissionDenied(_)
+            ));
         }
     }
 
@@ -145,5 +165,4 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
-
 }

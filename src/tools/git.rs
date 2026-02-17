@@ -9,7 +9,16 @@ const ALLOWED_COMMANDS: &[&str] = &[
 ];
 
 const BLOCKED_COMMANDS: &[&str] = &[
-    "push", "reset", "clean", "checkout", "rebase", "merge", "pull", "fetch", "remote", "clone",
+    "push",
+    "reset",
+    "clean",
+    "checkout",
+    "rebase",
+    "merge",
+    "pull",
+    "fetch",
+    "remote",
+    "clone",
     "force-push",
 ];
 
@@ -84,9 +93,9 @@ impl Tool for GitTool {
             }
         }
 
-        let output = cmd.output().map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to execute git: {}", e))
-        })?;
+        let output = cmd
+            .output()
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to execute git: {}", e)))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -183,7 +192,10 @@ mod tests {
         let tool = GitTool;
         let result = tool.execute(json!({"command": "push"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -191,7 +203,10 @@ mod tests {
         let tool = GitTool;
         let result = tool.execute(json!({"command": "reset"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -199,7 +214,10 @@ mod tests {
         let tool = GitTool;
         let result = tool.execute(json!({"command": "clean"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -207,7 +225,10 @@ mod tests {
         let tool = GitTool;
         let result = tool.execute(json!({"command": "bisect"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -224,7 +245,10 @@ mod tests {
         let tool = GitTool;
         let result = tool.execute(json!({}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[test]
@@ -258,11 +282,7 @@ mod tests {
         let tool = GitTool;
         for cmd in BLOCKED_COMMANDS {
             let result = tool.execute(json!({"command": cmd}));
-            assert!(
-                result.is_err(),
-                "git {} should be blocked",
-                cmd
-            );
+            assert!(result.is_err(), "git {} should be blocked", cmd);
             assert!(
                 matches!(result.unwrap_err(), ToolError::PermissionDenied(_)),
                 "git {} should return PermissionDenied",
@@ -288,7 +308,7 @@ mod tests {
         let result = tool.execute(json!({"command": "commit", "args": "-m 'test message'"}));
         // We're just checking it doesn't get rejected for missing -m
         match result {
-            Ok(_) => {} // Succeeded (something was staged)
+            Ok(_) => {}                              // Succeeded (something was staged)
             Err(ToolError::ExecutionFailed(_)) => {} // git itself errored (nothing to commit)
             Err(ToolError::InvalidArguments(msg)) => {
                 panic!("Should not get InvalidArguments with -m flag: {}", msg);

@@ -132,23 +132,17 @@ impl LlmProvider for OllamaClient {
             tools: Self::convert_tools(tools),
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .map_err(|e| {
-                if e.is_connect() {
-                    LlmError::ConnectionError(
-                        "Cannot connect to Ollama. Is it running? Start with: ollama serve"
-                            .to_string(),
-                    )
-                } else if e.is_timeout() {
-                    LlmError::RequestError("Request timed out".to_string())
-                } else {
-                    LlmError::RequestError(e.to_string())
-                }
-            })?;
+        let response = self.client.post(&url).json(&request).send().map_err(|e| {
+            if e.is_connect() {
+                LlmError::ConnectionError(
+                    "Cannot connect to Ollama. Is it running? Start with: ollama serve".to_string(),
+                )
+            } else if e.is_timeout() {
+                LlmError::RequestError("Request timed out".to_string())
+            } else {
+                LlmError::RequestError(e.to_string())
+            }
+        })?;
 
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -165,9 +159,9 @@ impl LlmProvider for OllamaClient {
             )));
         }
 
-        let resp_body: OllamaChatResponse = response.json().map_err(|e| {
-            LlmError::ParseError(format!("Failed to parse Ollama response: {}", e))
-        })?;
+        let resp_body: OllamaChatResponse = response
+            .json()
+            .map_err(|e| LlmError::ParseError(format!("Failed to parse Ollama response: {}", e)))?;
 
         let tool_calls = resp_body
             .message
@@ -209,23 +203,17 @@ impl LlmProvider for OllamaClient {
             tools: Self::convert_tools(tools),
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .map_err(|e| {
-                if e.is_connect() {
-                    LlmError::ConnectionError(
-                        "Cannot connect to Ollama. Is it running? Start with: ollama serve"
-                            .to_string(),
-                    )
-                } else if e.is_timeout() {
-                    LlmError::RequestError("Request timed out".to_string())
-                } else {
-                    LlmError::RequestError(e.to_string())
-                }
-            })?;
+        let response = self.client.post(&url).json(&request).send().map_err(|e| {
+            if e.is_connect() {
+                LlmError::ConnectionError(
+                    "Cannot connect to Ollama. Is it running? Start with: ollama serve".to_string(),
+                )
+            } else if e.is_timeout() {
+                LlmError::RequestError("Request timed out".to_string())
+            } else {
+                LlmError::RequestError(e.to_string())
+            }
+        })?;
 
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
@@ -381,7 +369,10 @@ mod tests {
         let tool_calls = converted[0].tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "read_file");
-        assert_eq!(tool_calls[0].function.arguments, json!({"path": "/tmp/test.txt"}));
+        assert_eq!(
+            tool_calls[0].function.arguments,
+            json!({"path": "/tmp/test.txt"})
+        );
     }
 
     #[test]
@@ -698,7 +689,11 @@ mod tests {
     #[test]
     fn test_streaming_empty_lines_skipped() {
         // In streaming, empty lines should be skipped
-        let lines = vec!["", "  ", "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":true}"];
+        let lines = vec![
+            "",
+            "  ",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":true}",
+        ];
         let mut found_content = false;
 
         for line in lines {

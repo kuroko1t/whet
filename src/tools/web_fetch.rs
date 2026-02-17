@@ -40,7 +40,9 @@ impl Tool for WebFetchTool {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to create HTTP client: {}", e))
+            })?;
 
         let response = client
             .get(url)
@@ -254,14 +256,20 @@ mod tests {
     fn test_web_fetch_invalid_url() {
         let tool = WebFetchTool;
         let result = tool.execute(json!({"url": "not-a-url"}));
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[test]
     fn test_web_fetch_missing_url() {
         let tool = WebFetchTool;
         let result = tool.execute(json!({}));
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[test]

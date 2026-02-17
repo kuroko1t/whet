@@ -72,7 +72,6 @@ impl Tool for ShellTool {
 
         Ok(result)
     }
-
 }
 
 #[cfg(test)]
@@ -119,7 +118,8 @@ mod tests {
     #[test]
     fn test_shell_invalid_working_dir() {
         let tool = ShellTool;
-        let result = tool.execute(json!({"command": "echo hi", "working_dir": "/nonexistent_dir_12345"}));
+        let result =
+            tool.execute(json!({"command": "echo hi", "working_dir": "/nonexistent_dir_12345"}));
         assert!(result.is_err());
     }
 
@@ -155,5 +155,4 @@ mod tests {
         let lines: Vec<&str> = result.trim().lines().collect();
         assert_eq!(lines.len(), 3);
     }
-
 }

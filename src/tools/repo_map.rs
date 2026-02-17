@@ -22,8 +22,7 @@ const SKIP_DIRS: &[&str] = &[
 ];
 
 const SOURCE_EXTENSIONS: &[&str] = &[
-    "rs", "py", "js", "ts", "go", "java", "c", "cpp", "h", "tsx", "jsx",
-    "rb", "kt", "kts",
+    "rs", "py", "js", "ts", "go", "java", "c", "cpp", "h", "tsx", "jsx", "rb", "kt", "kts",
 ];
 
 impl Tool for RepoMapTool {
@@ -189,16 +188,36 @@ fn extract_symbols(path: &Path) -> Vec<String> {
 
 fn extract_rust_symbol(line: &str) -> Option<String> {
     let prefixes = [
-        "pub fn ", "fn ", "pub(crate) fn ", "pub(super) fn ",
-        "pub async fn ", "async fn ", "pub const fn ", "const fn ",
-        "pub unsafe fn ", "unsafe fn ",
-        "pub struct ", "struct ", "pub(crate) struct ",
-        "pub enum ", "enum ", "pub(crate) enum ",
-        "pub trait ", "trait ", "pub(crate) trait ",
-        "impl ", "pub mod ", "mod ", "pub(crate) mod ",
-        "pub type ", "type ", "pub(crate) type ",
-        "pub const ", "const ",
-        "pub static ", "static ",
+        "pub fn ",
+        "fn ",
+        "pub(crate) fn ",
+        "pub(super) fn ",
+        "pub async fn ",
+        "async fn ",
+        "pub const fn ",
+        "const fn ",
+        "pub unsafe fn ",
+        "unsafe fn ",
+        "pub struct ",
+        "struct ",
+        "pub(crate) struct ",
+        "pub enum ",
+        "enum ",
+        "pub(crate) enum ",
+        "pub trait ",
+        "trait ",
+        "pub(crate) trait ",
+        "impl ",
+        "pub mod ",
+        "mod ",
+        "pub(crate) mod ",
+        "pub type ",
+        "type ",
+        "pub(crate) type ",
+        "pub const ",
+        "const ",
+        "pub static ",
+        "static ",
         "macro_rules! ",
     ];
     for prefix in &prefixes {
@@ -260,7 +279,9 @@ fn extract_java_symbol(line: &str) -> Option<String> {
         }
     }
     // Method detection: starts with access modifier + return type + name(
-    if (line.starts_with("public ") || line.starts_with("private ") || line.starts_with("protected "))
+    if (line.starts_with("public ")
+        || line.starts_with("private ")
+        || line.starts_with("protected "))
         && line.contains('(')
         && !line.contains("class ")
         && !line.contains("interface ")
@@ -292,7 +313,12 @@ fn extract_c_symbol(line: &str) -> Option<String> {
 
 fn extract_ruby_symbol(line: &str) -> Option<String> {
     let prefixes = [
-        "class ", "module ", "def ", "attr_reader ", "attr_writer ", "attr_accessor ",
+        "class ",
+        "module ",
+        "def ",
+        "attr_reader ",
+        "attr_writer ",
+        "attr_accessor ",
     ];
     for prefix in &prefixes {
         if line.starts_with(prefix) {
@@ -304,11 +330,23 @@ fn extract_ruby_symbol(line: &str) -> Option<String> {
 
 fn extract_kotlin_symbol(line: &str) -> Option<String> {
     let prefixes = [
-        "fun ", "class ", "data class ", "sealed class ", "object ", "interface ",
-        "enum class ", "abstract class ", "open class ",
-        "val ", "var ",
-        "suspend fun ", "inline fun ", "private fun ", "internal fun ",
-        "override fun ", "protected fun ",
+        "fun ",
+        "class ",
+        "data class ",
+        "sealed class ",
+        "object ",
+        "interface ",
+        "enum class ",
+        "abstract class ",
+        "open class ",
+        "val ",
+        "var ",
+        "suspend fun ",
+        "inline fun ",
+        "private fun ",
+        "internal fun ",
+        "override fun ",
+        "protected fun ",
     ];
     for prefix in &prefixes {
         if line.starts_with(prefix) {
@@ -446,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_extract_signature_truncation() {
-        let long_line = format!("pub fn very_long_function_name(arg1: String, arg2: String, arg3: String, arg4: String, arg5: String, arg6: String) -> Result<String, Error> {{");
+        let long_line = "pub fn very_long_function_name(arg1: String, arg2: String, arg3: String, arg4: String, arg5: String, arg6: String) -> Result<String, Error> {".to_string();
         let sig = extract_signature(&long_line);
         assert!(sig.len() <= 120);
         assert!(sig.ends_with("..."));
@@ -514,7 +552,10 @@ mod tests {
         let tool = RepoMapTool;
         let result = tool.execute(json!({"path": "/etc/shadow"}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -581,9 +622,13 @@ mod tests {
         assert!(extract_rust_symbol("pub unsafe fn raw_ptr()").is_some());
         assert!(extract_rust_symbol("unsafe fn danger()").is_some());
         // type alias, const, static
-        assert!(extract_rust_symbol("pub type Result<T> = std::result::Result<T, Error>;").is_some());
+        assert!(
+            extract_rust_symbol("pub type Result<T> = std::result::Result<T, Error>;").is_some()
+        );
         assert!(extract_rust_symbol("pub const MAX: usize = 100;").is_some());
-        assert!(extract_rust_symbol("pub static INSTANCE: Lazy<Foo> = Lazy::new(|| Foo);").is_some());
+        assert!(
+            extract_rust_symbol("pub static INSTANCE: Lazy<Foo> = Lazy::new(|| Foo);").is_some()
+        );
         // macro_rules
         assert!(extract_rust_symbol("macro_rules! my_macro {").is_some());
     }
@@ -622,8 +667,14 @@ mod tests {
 
         let tool = RepoMapTool;
         let result = tool.execute(json!({"path": dir})).unwrap();
-        assert!(result.contains("L2:"), "Should contain line number for fn hello");
-        assert!(result.contains("L5:"), "Should contain line number for struct Foo");
+        assert!(
+            result.contains("L2:"),
+            "Should contain line number for fn hello"
+        );
+        assert!(
+            result.contains("L5:"),
+            "Should contain line number for struct Foo"
+        );
 
         std::fs::remove_dir_all(dir).ok();
     }

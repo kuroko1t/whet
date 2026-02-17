@@ -33,15 +33,14 @@ impl Tool for WebSearchTool {
         let query = args["query"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'query' argument".to_string()))?;
-        let max_results = args["max_results"]
-            .as_u64()
-            .unwrap_or(5)
-            .min(10) as usize;
+        let max_results = args["max_results"].as_u64().unwrap_or(5).min(10) as usize;
 
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to create HTTP client: {}", e))
+            })?;
 
         // Use DuckDuckGo HTML search (no API key required)
         let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
@@ -50,9 +49,7 @@ impl Tool for WebSearchTool {
             .get(&url)
             .header("User-Agent", "hermitclaw/0.1.0")
             .send()
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("Search failed: {}", e))
-            })?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
 
         if !response.status().is_success() {
             return Err(ToolError::ExecutionFailed(format!(
@@ -170,7 +167,10 @@ fn parse_ddg_results(html: &str, max: usize) -> Vec<SearchResult> {
         // Clean up the URL (DuckDuckGo wraps URLs in redirect)
         let clean_url = if let Some(uddg_pos) = href.find("uddg=") {
             let url_start = uddg_pos + 5;
-            let url_end = href[url_start..].find('&').map(|p| url_start + p).unwrap_or(href.len());
+            let url_end = href[url_start..]
+                .find('&')
+                .map(|p| url_start + p)
+                .unwrap_or(href.len());
             url_decode(&href[url_start..url_end])
         } else {
             href
@@ -227,10 +227,8 @@ fn url_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                &String::from_utf8_lossy(&bytes[i + 1..i + 3]),
-                16,
-            ) {
+            if let Ok(byte) = u8::from_str_radix(&String::from_utf8_lossy(&bytes[i + 1..i + 3]), 16)
+            {
                 result.push(byte as char);
                 i += 3;
                 continue;
@@ -285,7 +283,10 @@ mod tests {
     fn test_web_search_missing_query() {
         let tool = WebSearchTool;
         let result = tool.execute(json!({}));
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[test]

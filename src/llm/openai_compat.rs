@@ -189,9 +189,9 @@ impl LlmProvider for OpenAiCompatClient {
             )));
         }
 
-        let resp_body: ChatResponse = response.json().map_err(|e| {
-            LlmError::ParseError(format!("Failed to parse response: {}", e))
-        })?;
+        let resp_body: ChatResponse = response
+            .json()
+            .map_err(|e| LlmError::ParseError(format!("Failed to parse response: {}", e)))?;
 
         let choice = resp_body
             .choices
@@ -206,10 +206,8 @@ impl LlmProvider for OpenAiCompatClient {
             .into_iter()
             .map(|tc| {
                 // OpenAI sends arguments as a JSON string, parse it
-                let arguments: serde_json::Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| {
-                        serde_json::Value::Object(serde_json::Map::new())
-                    });
+                let arguments: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
                 ToolCall {
                     id: tc.id,
                     name: tc.function.name,
@@ -218,10 +216,7 @@ impl LlmProvider for OpenAiCompatClient {
             })
             .collect::<Vec<_>>();
 
-        let content = choice
-            .message
-            .content
-            .filter(|c| !c.is_empty());
+        let content = choice.message.content.filter(|c| !c.is_empty());
 
         Ok(LlmResponse {
             content,
@@ -313,11 +308,10 @@ impl LlmProvider for OpenAiCompatClient {
                     }
 
                     // Tool call deltas
-                    if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array())
-                    {
+                    if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
                         for tc in tool_calls {
-                            let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
-                                as usize;
+                            let index =
+                                tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                             let entry = tool_call_map
                                 .entry(index)
                                 .or_insert_with(|| (String::new(), String::new(), String::new()));
@@ -329,9 +323,7 @@ impl LlmProvider for OpenAiCompatClient {
                                 if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
                                     entry.1 = name.to_string();
                                 }
-                                if let Some(args) =
-                                    func.get("arguments").and_then(|a| a.as_str())
-                                {
+                                if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
                                     entry.2.push_str(args);
                                 }
                             }
@@ -345,10 +337,8 @@ impl LlmProvider for OpenAiCompatClient {
         let mut tool_calls: Vec<ToolCall> = tool_call_map
             .into_iter()
             .map(|(_, (id, name, args_str))| {
-                let arguments: serde_json::Value =
-                    serde_json::from_str(&args_str).unwrap_or_else(|_| {
-                        serde_json::Value::Object(serde_json::Map::new())
-                    });
+                let arguments: serde_json::Value = serde_json::from_str(&args_str)
+                    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
                 ToolCall {
                     id,
                     name,
@@ -620,8 +610,9 @@ mod tests {
             };
             if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
                 if let Some(choice) = choices.first() {
-                    if let Some(tool_calls) =
-                        choice["delta"].get("tool_calls").and_then(|tc| tc.as_array())
+                    if let Some(tool_calls) = choice["delta"]
+                        .get("tool_calls")
+                        .and_then(|tc| tc.as_array())
                     {
                         for tc in tool_calls {
                             let index =
@@ -636,8 +627,7 @@ mod tests {
                                 if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
                                     entry.1 = name.to_string();
                                 }
-                                if let Some(args) = func.get("arguments").and_then(|a| a.as_str())
-                                {
+                                if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
                                     entry.2.push_str(args);
                                 }
                             }
@@ -678,8 +668,9 @@ mod tests {
             let chunk: serde_json::Value = serde_json::from_str(data).unwrap();
             if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
                 if let Some(choice) = choices.first() {
-                    if let Some(tcs) =
-                        choice["delta"].get("tool_calls").and_then(|tc| tc.as_array())
+                    if let Some(tcs) = choice["delta"]
+                        .get("tool_calls")
+                        .and_then(|tc| tc.as_array())
                     {
                         for tc in tcs {
                             let index =
@@ -694,8 +685,7 @@ mod tests {
                                 if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
                                     entry.1 = name.to_string();
                                 }
-                                if let Some(args) = func.get("arguments").and_then(|a| a.as_str())
-                                {
+                                if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
                                     entry.2.push_str(args);
                                 }
                             }

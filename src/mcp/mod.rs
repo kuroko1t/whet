@@ -12,7 +12,11 @@ use std::sync::{Arc, Mutex};
 /// Register MCP tools from configured servers into the tool registry.
 pub fn register_mcp_tools(registry: &mut ToolRegistry, servers: &[McpServerConfig]) {
     for server_config in servers {
-        match McpClient::new(&server_config.name, &server_config.command, &server_config.args) {
+        match McpClient::new(
+            &server_config.name,
+            &server_config.command,
+            &server_config.args,
+        ) {
             Ok(mut client) => {
                 let server_name = server_config.name.clone();
                 match client.list_tools() {
@@ -21,15 +25,11 @@ pub fn register_mcp_tools(registry: &mut ToolRegistry, servers: &[McpServerConfi
                         let tool_count = tools.len();
 
                         for tool_info in tools {
-                            let tool_name =
-                                format!("mcp_{}_{}", server_name, tool_info.name);
+                            let tool_name = format!("mcp_{}_{}", server_name, tool_info.name);
                             let description = format!(
                                 "[MCP:{}] {}",
                                 server_name,
-                                tool_info
-                                    .description
-                                    .as_deref()
-                                    .unwrap_or("No description")
+                                tool_info.description.as_deref().unwrap_or("No description")
                             );
                             let input_schema = tool_info.input_schema.unwrap_or_else(|| {
                                 serde_json::json!({

@@ -61,8 +61,9 @@ impl Tool for ApplyDiffTool {
 
         let new_content = apply_hunks(&content, &hunks)?;
 
-        std::fs::write(path, &new_content)
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to write '{}': {}", path, e)))?;
+        std::fs::write(path, &new_content).map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to write '{}': {}", path, e))
+        })?;
 
         Ok(format!(
             "Successfully applied {} hunk(s) to '{}'",
@@ -154,17 +155,17 @@ fn parse_hunk_header(line: &str) -> Result<(usize, usize), ToolError> {
 
     let old_range = parts[1].trim_start_matches('-');
     let (old_start, old_count) = if let Some((start, count)) = old_range.split_once(',') {
-        let s = start
-            .parse::<usize>()
-            .map_err(|_| ToolError::InvalidArguments(format!("Invalid line number in: {}", line)))?;
+        let s = start.parse::<usize>().map_err(|_| {
+            ToolError::InvalidArguments(format!("Invalid line number in: {}", line))
+        })?;
         let c = count
             .parse::<usize>()
             .map_err(|_| ToolError::InvalidArguments(format!("Invalid count in: {}", line)))?;
         (s, c)
     } else {
-        let s = old_range
-            .parse::<usize>()
-            .map_err(|_| ToolError::InvalidArguments(format!("Invalid line number in: {}", line)))?;
+        let s = old_range.parse::<usize>().map_err(|_| {
+            ToolError::InvalidArguments(format!("Invalid line number in: {}", line))
+        })?;
         (s, 1)
     };
 
@@ -389,7 +390,10 @@ mod tests {
             "path": "/etc/shadow",
             "diff": "@@ -1,1 +1,1 @@\n-old\n+new"
         }));
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -412,7 +416,10 @@ mod tests {
             "path": path,
             "diff": "not a valid diff"
         }));
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
 
         cleanup(path);
     }
@@ -425,7 +432,8 @@ mod tests {
             ToolError::InvalidArguments(_)
         ));
         assert!(matches!(
-            tool.execute(json!({"diff": "@@ -1,1 +1,1 @@\n-a\n+b"})).unwrap_err(),
+            tool.execute(json!({"diff": "@@ -1,1 +1,1 @@\n-a\n+b"}))
+                .unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
     }
@@ -454,10 +462,12 @@ mod tests {
         setup_test_file(path, "  indented\nnormal\n  also indented\n");
 
         let tool = ApplyDiffTool;
-        let result = tool.execute(json!({
-            "path": path,
-            "diff": "@@ -1,3 +1,3 @@\n   indented\n-normal\n+CHANGED\n   also indented"
-        })).unwrap();
+        let result = tool
+            .execute(json!({
+                "path": path,
+                "diff": "@@ -1,3 +1,3 @@\n   indented\n-normal\n+CHANGED\n   also indented"
+            }))
+            .unwrap();
 
         assert!(result.contains("1 hunk(s)"));
         let content = std::fs::read_to_string(path).unwrap();

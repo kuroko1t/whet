@@ -38,12 +38,12 @@ impl Tool for EditFileTool {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'path' argument".to_string()))?;
-        let old_text = args["old_text"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments("missing 'old_text' argument".to_string()))?;
-        let new_text = args["new_text"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments("missing 'new_text' argument".to_string()))?;
+        let old_text = args["old_text"].as_str().ok_or_else(|| {
+            ToolError::InvalidArguments("missing 'old_text' argument".to_string())
+        })?;
+        let new_text = args["new_text"].as_str().ok_or_else(|| {
+            ToolError::InvalidArguments("missing 'new_text' argument".to_string())
+        })?;
 
         if !is_path_safe(path) {
             return Err(ToolError::PermissionDenied(format!(
@@ -179,13 +179,22 @@ mod tests {
         let tool = EditFileTool;
 
         let result = tool.execute(json!({"old_text": "a", "new_text": "b"}));
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
 
         let result = tool.execute(json!({"path": "/tmp/test.txt", "new_text": "b"}));
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
 
         let result = tool.execute(json!({"path": "/tmp/test.txt", "old_text": "a"}));
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[test]
@@ -196,7 +205,10 @@ mod tests {
             "old_text": "a",
             "new_text": "b"
         }));
-        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -293,10 +305,7 @@ mod tests {
     #[test]
     fn test_edit_file_context_output() {
         let path = "/tmp/hermitclaw_test_edit_context.txt";
-        setup_test_file(
-            path,
-            "line1\nline2\nline3\nTARGET\nline5\nline6\nline7\n",
-        );
+        setup_test_file(path, "line1\nline2\nline3\nTARGET\nline5\nline6\nline7\n");
 
         let tool = EditFileTool;
         let result = tool

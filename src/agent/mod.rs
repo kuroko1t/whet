@@ -32,11 +32,7 @@ impl Default for AgentConfig {
 }
 
 impl Agent {
-    pub fn new(
-        llm: Box<dyn LlmProvider>,
-        tools: ToolRegistry,
-        config: AgentConfig,
-    ) -> Self {
+    pub fn new(llm: Box<dyn LlmProvider>, tools: ToolRegistry, config: AgentConfig) -> Self {
         let memory = vec![Message::system(&prompt::system_prompt())];
         Self {
             llm,
@@ -92,8 +88,9 @@ impl Agent {
             }
 
             // Process tool calls
-            self.memory
-                .push(Message::assistant_with_tool_calls(response.tool_calls.clone()));
+            self.memory.push(Message::assistant_with_tool_calls(
+                response.tool_calls.clone(),
+            ));
 
             for tool_call in &response.tool_calls {
                 eprintln!(
@@ -318,7 +315,9 @@ mod tests {
             .iter()
             .find(|m| m.role == Role::Tool)
             .expect("Should have a tool result message");
-        assert!(tool_result_msg.content.contains("Unknown tool: nonexistent_tool"));
+        assert!(tool_result_msg
+            .content
+            .contains("Unknown tool: nonexistent_tool"));
     }
 
     #[test]
@@ -780,17 +779,17 @@ mod tests {
         let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Yolo);
 
         let mut approval_called = false;
-        let response = agent.process_message_with_callbacks(
-            "Run echo",
-            &mut |_| {},
-            &mut |_, _| {
+        let response =
+            agent.process_message_with_callbacks("Run echo", &mut |_| {}, &mut |_, _| {
                 approval_called = true;
                 false // Would deny, but should never be called
-            },
-        );
+            });
 
         assert_eq!(response, "Done.");
-        assert!(!approval_called, "Approval should not be called in yolo mode");
+        assert!(
+            !approval_called,
+            "Approval should not be called in yolo mode"
+        );
     }
 
     #[test]
@@ -813,14 +812,11 @@ mod tests {
         let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Default);
 
         let mut approval_called = false;
-        let response = agent.process_message_with_callbacks(
-            "Read Cargo.toml",
-            &mut |_| {},
-            &mut |_, _| {
+        let response =
+            agent.process_message_with_callbacks("Read Cargo.toml", &mut |_| {}, &mut |_, _| {
                 approval_called = true;
                 false
-            },
-        );
+            });
 
         assert_eq!(response, "Read the file.");
         assert!(
@@ -852,14 +848,11 @@ mod tests {
         let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::AcceptEdits);
 
         let mut approval_called = false;
-        let response = agent.process_message_with_callbacks(
-            "Write file",
-            &mut |_| {},
-            &mut |_, _| {
+        let response =
+            agent.process_message_with_callbacks("Write file", &mut |_| {}, &mut |_, _| {
                 approval_called = true;
                 false
-            },
-        );
+            });
 
         assert_eq!(response, "File written.");
         assert!(

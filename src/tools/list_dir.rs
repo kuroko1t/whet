@@ -47,7 +47,6 @@ impl Tool for ListDirTool {
         list_entries(path, recursive, &mut entries)?;
         Ok(entries.join("\n"))
     }
-
 }
 
 fn list_entries(path: &str, recursive: bool, entries: &mut Vec<String>) -> Result<(), ToolError> {
@@ -142,7 +141,11 @@ mod tests {
         // All subdirectories should end with /
         for line in result.lines() {
             if std::path::Path::new(line.trim_end_matches('/')).is_dir() {
-                assert!(line.ends_with('/'), "Directory entry should end with /: {}", line);
+                assert!(
+                    line.ends_with('/'),
+                    "Directory entry should end with /: {}",
+                    line
+                );
             }
         }
     }
@@ -152,7 +155,10 @@ mod tests {
         let tool = ListDirTool;
         let result = tool.execute(json!({}));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
     }
 
     #[test]
@@ -162,5 +168,4 @@ mod tests {
         let result = tool.execute(json!({"path": "Cargo.toml"}));
         assert!(result.is_err());
     }
-
 }
