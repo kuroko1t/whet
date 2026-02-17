@@ -10,5 +10,9 @@ Available tools:
 - grep: Search for a text pattern in files recursively (skips .git, target, node_modules)
 - git: Execute safe git commands (status, diff, log, add, commit, branch, show, stash)
 - repo_map: Show project structure with function/class/type definitions
-- apply_diff: Apply a unified diff/patch to a file (supports multi-hunk patches)".to_string()
+- apply_diff: Apply a unified diff/patch to a file (supports multi-hunk patches)
+
+When web tools are available:
+- web_fetch: Fetch the text contents of a URL
+- web_search: Search the web for information".to_string()
 }

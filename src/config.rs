@@ -65,6 +65,8 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    #[serde(default)]
+    pub web_enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -99,6 +101,7 @@ impl Default for Config {
             agent: AgentConfig {
                 max_iterations: 10,
                 permission_mode: PermissionMode::Default,
+                web_enabled: false,
             },
             memory: MemoryConfig {
                 database_path: "~/.hermitclaw/memory.db".to_string(),

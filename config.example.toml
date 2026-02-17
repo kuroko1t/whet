@@ -22,6 +22,7 @@ max_iterations = 10
 # - default: Ask before file writes and command execution
 # - accept_edits: Auto-approve file edits, ask for shell/git
 # - yolo: No confirmation needed
+# web_enabled = false            # Enable web_fetch and web_search tools (requires internet)
 
 [memory]
 database_path = "~/.hermitclaw/memory.db"

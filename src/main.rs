@@ -151,6 +151,12 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
     let provider = create_provider(&cfg, &model);
     let mut registry = default_registry();
 
+    // Register web tools if enabled
+    if cfg.agent.web_enabled {
+        tools::register_web_tools(&mut registry);
+        println!("Web tools: {}", "enabled".green());
+    }
+
     // Register MCP tools
     if !cfg.mcp.servers.is_empty() {
         mcp::register_mcp_tools(&mut registry, &cfg.mcp.servers);
@@ -524,6 +530,9 @@ fn main() {
         Commands::Tools => {
             let cfg = Config::load();
             let mut registry = default_registry();
+            if cfg.agent.web_enabled {
+                tools::register_web_tools(&mut registry);
+            }
             if !cfg.mcp.servers.is_empty() {
                 mcp::register_mcp_tools(&mut registry, &cfg.mcp.servers);
             }

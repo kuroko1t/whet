@@ -6,6 +6,8 @@ pub mod list_dir;
 pub mod read_file;
 pub mod repo_map;
 pub mod shell;
+pub mod web_fetch;
+pub mod web_search;
 pub mod write_file;
 
 use crate::config::ToolRiskLevel;
@@ -113,6 +115,12 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Box::new(repo_map::RepoMapTool));
     registry.register(Box::new(apply_diff::ApplyDiffTool));
     registry
+}
+
+/// Register web tools (web_fetch, web_search). Call this when web features are enabled.
+pub fn register_web_tools(registry: &mut ToolRegistry) {
+    registry.register(Box::new(web_fetch::WebFetchTool));
+    registry.register(Box::new(web_search::WebSearchTool));
 }
 
 #[cfg(test)]
