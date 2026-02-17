@@ -217,6 +217,7 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
         id
     };
 
+    let mut current_model = model;
     let mut rl = rustyline::DefaultEditor::new().expect("Failed to initialize readline");
 
     loop {
@@ -228,6 +229,18 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
                     continue;
                 }
                 let _ = rl.add_history_entry(input);
+
+                // Handle slash commands
+                if input.starts_with('/') {
+                    match handle_slash_command(input, &cfg, &mut agent, &mut current_model) {
+                        SlashResult::Handled => continue,
+                        SlashResult::NewProvider(provider) => {
+                            agent.llm = provider;
+                            continue;
+                        }
+                        SlashResult::NotACommand => {} // Pass through to LLM
+                    }
+                }
 
                 // Save user message
                 if let Some(ref store) = store {
@@ -280,6 +293,99 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
                 break;
             }
         }
+    }
+}
+
+enum SlashResult {
+    Handled,
+    NewProvider(Box<dyn LlmProvider>),
+    NotACommand,
+}
+
+fn handle_slash_command(
+    input: &str,
+    cfg: &Config,
+    agent: &mut Agent,
+    current_model: &mut String,
+) -> SlashResult {
+    let parts: Vec<&str> = input.splitn(2, ' ').collect();
+    let cmd = parts[0];
+    let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+
+    match cmd {
+        "/model" => {
+            if arg.is_empty() {
+                println!("Current model: {}", current_model.green());
+                println!(
+                    "Usage: {} <model_name>",
+                    "/model".cyan()
+                );
+            } else {
+                let new_model = arg.to_string();
+                println!(
+                    "Switching model: {} -> {}",
+                    current_model.dimmed(),
+                    new_model.green()
+                );
+                *current_model = new_model.clone();
+                let provider = create_provider(cfg, &new_model);
+                return SlashResult::NewProvider(provider);
+            }
+            SlashResult::Handled
+        }
+        "/mode" => {
+            if arg.is_empty() {
+                println!(
+                    "Current permission mode: {}",
+                    agent.config.permission_mode.to_string().cyan()
+                );
+                println!("Usage: {} <default|accept_edits|yolo>", "/mode".cyan());
+            } else {
+                match arg {
+                    "default" => {
+                        agent.config.permission_mode = config::PermissionMode::Default;
+                        println!("Permission mode: {}", "default".cyan());
+                    }
+                    "accept_edits" => {
+                        agent.config.permission_mode = config::PermissionMode::AcceptEdits;
+                        println!("Permission mode: {}", "accept_edits".cyan());
+                    }
+                    "yolo" => {
+                        agent.config.permission_mode = config::PermissionMode::Yolo;
+                        println!("Permission mode: {}", "yolo".yellow());
+                    }
+                    _ => {
+                        eprintln!(
+                            "{} Unknown mode '{}'. Use: default, accept_edits, yolo",
+                            "Error:".red(),
+                            arg
+                        );
+                    }
+                }
+            }
+            SlashResult::Handled
+        }
+        "/help" => {
+            println!("{}", "Available commands:".bold());
+            println!("  {} <name>  - Switch LLM model", "/model".cyan());
+            println!(
+                "  {} <mode>  - Change permission mode (default/accept_edits/yolo)",
+                "/mode".cyan()
+            );
+            println!("  {}          - Clear conversation history", "/clear".cyan());
+            println!("  {}           - Show this help", "/help".cyan());
+            println!("  {}           - Exit", "Ctrl+D".dimmed());
+            SlashResult::Handled
+        }
+        "/clear" => {
+            agent.memory.clear();
+            agent
+                .memory
+                .push(llm::Message::system(&agent::prompt::system_prompt()));
+            println!("{}", "Conversation cleared.".green());
+            SlashResult::Handled
+        }
+        _ => SlashResult::NotACommand,
     }
 }
 
