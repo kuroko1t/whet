@@ -1,4 +1,5 @@
 use super::{Tool, ToolError, ToolPermissions};
+use crate::sandbox::namespace::is_path_safe;
 use serde_json::json;
 
 pub struct ListDirTool;
@@ -34,6 +35,13 @@ impl Tool for ListDirTool {
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'path' argument".to_string()))?;
         let recursive = args["recursive"].as_bool().unwrap_or(false);
+
+        if !is_path_safe(path) {
+            return Err(ToolError::PermissionDenied(format!(
+                "Access to '{}' is blocked for security",
+                path
+            )));
+        }
 
         let mut entries = Vec::new();
         list_entries(path, recursive, &mut entries)?;
