@@ -1,0 +1,176 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Shell gradient -->
+    <linearGradient id="shellGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="50%" style="stop-color:#16213e"/>
+      <stop offset="100%" style="stop-color:#0f3460"/>
+    </linearGradient>
+    <!-- Shell highlight -->
+    <linearGradient id="shellHighlight" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#e94560;stop-opacity:0.9"/>
+      <stop offset="100%" style="stop-color:#c23152;stop-opacity:0.7"/>
+    </linearGradient>
+    <!-- Claw gradient -->
+    <linearGradient id="clawGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#e94560"/>
+      <stop offset="100%" style="stop-color:#a83242"/>
+    </linearGradient>
+    <!-- Body gradient -->
+    <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#533483"/>
+      <stop offset="100%" style="stop-color:#3a1f5e"/>
+    </linearGradient>
+    <!-- Terminal glow -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <!-- Drop shadow -->
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- === SHELL (spiral/shield shape) === -->
+  <g filter="url(#shadow)">
+    <!-- Main shell body -->
+    <path d="
+      M 256 80
+      C 340 80, 400 130, 410 210
+      C 420 290, 380 360, 310 380
+      C 270 392, 240 385, 220 370
+      C 195 348, 185 310, 190 270
+      C 195 235, 215 210, 245 205
+      C 265 200, 280 215, 282 235
+      C 285 258, 270 270, 256 268
+      Z
+    " fill="url(#shellGrad)" stroke="#0f3460" stroke-width="2"/>
+
+    <!-- Shell spiral line 1 -->
+    <path d="
+      M 256 100
+      C 330 100, 385 145, 395 215
+      C 405 285, 370 345, 310 365
+    " fill="none" stroke="#e94560" stroke-width="2.5" stroke-opacity="0.5"/>
+
+    <!-- Shell spiral line 2 -->
+    <path d="
+      M 256 130
+      C 315 130, 360 165, 370 220
+      C 380 278, 350 325, 300 342
+    " fill="none" stroke="#e94560" stroke-width="2" stroke-opacity="0.35"/>
+
+    <!-- Shell spiral line 3 (inner) -->
+    <path d="
+      M 255 170
+      C 295 168, 330 190, 338 230
+      C 345 268, 320 300, 280 310
+    " fill="none" stroke="#e94560" stroke-width="1.5" stroke-opacity="0.25"/>
+  </g>
+
+  <!-- === TERMINAL SCREEN on shell === -->
+  <g transform="translate(275, 150) rotate(15)">
+    <!-- Screen background -->
+    <rect x="0" y="0" width="80" height="55" rx="6" ry="6" fill="#0a0a1a" stroke="#e94560" stroke-width="1.5" stroke-opacity="0.6"/>
+    <!-- Terminal dots -->
+    <circle cx="10" cy="8" r="2.5" fill="#e94560" opacity="0.8"/>
+    <circle cx="18" cy="8" r="2.5" fill="#e9a045" opacity="0.8"/>
+    <circle cx="26" cy="8" r="2.5" fill="#45e96a" opacity="0.8"/>
+    <!-- Terminal text lines -->
+    <g filter="url(#glow)" opacity="0.9">
+      <text x="8" y="25" font-family="monospace" font-size="8" fill="#45e96a">$ hermitclaw</text>
+      <text x="8" y="35" font-family="monospace" font-size="7" fill="#e94560">&#x276F; ready</text>
+      <rect x="8" y="40" width="4" height="8" fill="#45e96a" opacity="0.8">
+        <animate attributeName="opacity" values="0.8;0.2;0.8" dur="1.2s" repeatCount="indefinite"/>
+      </rect>
+    </g>
+  </g>
+
+  <!-- === BODY === -->
+  <ellipse cx="220" cy="395" rx="65" ry="35" fill="url(#bodyGrad)" filter="url(#shadow)"/>
+
+  <!-- === EYES === -->
+  <!-- Eye stalks -->
+  <path d="M 200 375 Q 185 340, 175 325" stroke="#533483" stroke-width="8" fill="none" stroke-linecap="round"/>
+  <path d="M 215 370 Q 210 335, 215 320" stroke="#533483" stroke-width="8" fill="none" stroke-linecap="round"/>
+  <!-- Eye balls -->
+  <circle cx="173" cy="322" r="10" fill="#1a1a2e" stroke="#533483" stroke-width="2"/>
+  <circle cx="213" cy="317" r="10" fill="#1a1a2e" stroke="#533483" stroke-width="2"/>
+  <!-- Pupils - glowing -->
+  <circle cx="175" cy="321" r="5" fill="#e94560" filter="url(#glow)"/>
+  <circle cx="215" cy="316" r="5" fill="#e94560" filter="url(#glow)"/>
+  <!-- Eye shine -->
+  <circle cx="177" cy="319" r="2" fill="#fff" opacity="0.7"/>
+  <circle cx="217" cy="314" r="2" fill="#fff" opacity="0.7"/>
+
+  <!-- === LEFT CLAW (big claw) === -->
+  <g filter="url(#shadow)">
+    <!-- Upper pincer -->
+    <path d="
+      M 155 400
+      C 130 385, 80 370, 60 340
+      C 45 315, 50 285, 75 275
+      C 95 267, 110 280, 105 295
+    " fill="url(#clawGrad)" stroke="#a83242" stroke-width="2"/>
+    <!-- Lower pincer -->
+    <path d="
+      M 155 405
+      C 130 410, 80 400, 62 375
+      C 48 355, 55 330, 70 320
+      C 80 313, 95 318, 100 330
+    " fill="url(#clawGrad)" stroke="#a83242" stroke-width="2"/>
+    <!-- Claw joint -->
+    <circle cx="155" cy="402" r="12" fill="#a83242"/>
+  </g>
+
+  <!-- === RIGHT CLAW (small claw) === -->
+  <g filter="url(#shadow)">
+    <!-- Upper pincer -->
+    <path d="
+      M 280 405
+      C 300 395, 330 385, 345 370
+      C 355 358, 352 340, 340 335
+      C 328 330, 320 340, 325 350
+    " fill="url(#clawGrad)" stroke="#a83242" stroke-width="1.5"/>
+    <!-- Lower pincer -->
+    <path d="
+      M 280 410
+      C 300 412, 335 400, 348 385
+      C 358 373, 352 358, 340 355
+      C 330 352, 325 360, 330 370
+    " fill="url(#clawGrad)" stroke="#a83242" stroke-width="1.5"/>
+    <!-- Claw joint -->
+    <circle cx="280" cy="407" r="9" fill="#a83242"/>
+  </g>
+
+  <!-- === LEGS === -->
+  <g stroke="#3a1f5e" stroke-width="5" fill="none" stroke-linecap="round">
+    <!-- Left legs -->
+    <path d="M 175 415 Q 155 440, 135 455"/>
+    <path d="M 185 420 Q 165 450, 145 470"/>
+    <path d="M 195 425 Q 180 455, 165 478"/>
+    <!-- Right legs -->
+    <path d="M 255 420 Q 270 448, 285 460"/>
+    <path d="M 248 425 Q 260 453, 275 472"/>
+    <path d="M 240 428 Q 248 458, 258 478"/>
+  </g>
+
+  <!-- === SHIELD ICON (security badge on shell) === -->
+  <g transform="translate(340, 260)" filter="url(#glow)">
+    <path d="
+      M 0 -18
+      L 15 -10
+      L 15 5
+      C 15 15, 0 22, 0 22
+      C 0 22, -15 15, -15 5
+      L -15 -10
+      Z
+    " fill="none" stroke="#45e96a" stroke-width="2" opacity="0.8"/>
+    <!-- Checkmark -->
+    <path d="M -5 2 L -1 7 L 7 -4" fill="none" stroke="#45e96a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/>
+  </g>
+</svg>

@@ -1,24 +1,5 @@
 <p align="center">
-<pre>
-    .---.
-   /     \        ___
-  |  O O  |      /   \
-  |  \_/  |     | === |
-   \_____/  ___/|     |
-    |   |  /####|     |
-   /|   |\/####/|_____|
-  / |   |  `--´ /    /
- /  \___/      /    /
-(____________ /    /
- \__________/____/
-</pre>
-</p>
-
-<h1 align="center">hermitclaw</h1>
-
-<p align="center">
-  <strong>The hermit needs no network.</strong><br>
-  Fully offline, secure-by-default AI coding agent — built in Rust.
+  <img src="assets/banner.svg" alt="HermitClaw" width="800">
 </p>
 
 <p align="center">

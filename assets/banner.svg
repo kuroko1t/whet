@@ -1,0 +1,228 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400">
+  <defs>
+    <!-- Background gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0a0a1a"/>
+      <stop offset="40%" style="stop-color:#0f1629"/>
+      <stop offset="100%" style="stop-color:#1a1a2e"/>
+    </linearGradient>
+    <!-- Shell gradient -->
+    <linearGradient id="shellGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1e2a4a"/>
+      <stop offset="50%" style="stop-color:#16213e"/>
+      <stop offset="100%" style="stop-color:#0f3460"/>
+    </linearGradient>
+    <!-- Claw gradient -->
+    <linearGradient id="clawGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#e94560"/>
+      <stop offset="100%" style="stop-color:#a83242"/>
+    </linearGradient>
+    <!-- Body gradient -->
+    <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#533483"/>
+      <stop offset="100%" style="stop-color:#3a1f5e"/>
+    </linearGradient>
+    <!-- Text gradient -->
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#e94560"/>
+      <stop offset="50%" style="stop-color:#ff6b81"/>
+      <stop offset="100%" style="stop-color:#e94560"/>
+    </linearGradient>
+    <!-- Glow filter -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2.5" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <!-- Text glow -->
+    <filter id="textGlow">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <!-- Drop shadow -->
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#000" flood-opacity="0.4"/>
+    </filter>
+    <!-- Subtle grid pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#ffffff" stroke-width="0.3" stroke-opacity="0.04"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="400" fill="url(#bgGrad)"/>
+  <rect width="1200" height="400" fill="url(#grid)"/>
+
+  <!-- Subtle accent line at bottom -->
+  <line x1="0" y1="396" x2="1200" y2="396" stroke="#e94560" stroke-width="4" stroke-opacity="0.6"/>
+
+  <!-- Decorative dots background -->
+  <circle cx="900" cy="80" r="120" fill="#e94560" opacity="0.03"/>
+  <circle cx="1050" cy="300" r="80" fill="#533483" opacity="0.05"/>
+  <circle cx="150" cy="50" r="60" fill="#0f3460" opacity="0.08"/>
+
+  <!-- ========== HERMIT CRAB (left side, centered at ~200, 200) ========== -->
+  <g transform="translate(60, 10) scale(0.75)">
+
+    <!-- Shell -->
+    <g filter="url(#shadow)">
+      <path d="
+        M 256 80
+        C 340 80, 400 130, 410 210
+        C 420 290, 380 360, 310 380
+        C 270 392, 240 385, 220 370
+        C 195 348, 185 310, 190 270
+        C 195 235, 215 210, 245 205
+        C 265 200, 280 215, 282 235
+        C 285 258, 270 270, 256 268
+        Z
+      " fill="url(#shellGrad)" stroke="#1a3a6a" stroke-width="2"/>
+
+      <!-- Shell spiral lines -->
+      <path d="
+        M 256 100
+        C 330 100, 385 145, 395 215
+        C 405 285, 370 345, 310 365
+      " fill="none" stroke="#e94560" stroke-width="2.5" stroke-opacity="0.5"/>
+      <path d="
+        M 256 130
+        C 315 130, 360 165, 370 220
+        C 380 278, 350 325, 300 342
+      " fill="none" stroke="#e94560" stroke-width="2" stroke-opacity="0.35"/>
+      <path d="
+        M 255 170
+        C 295 168, 330 190, 338 230
+        C 345 268, 320 300, 280 310
+      " fill="none" stroke="#e94560" stroke-width="1.5" stroke-opacity="0.25"/>
+    </g>
+
+    <!-- Terminal on shell -->
+    <g transform="translate(275, 150) rotate(15)">
+      <rect x="0" y="0" width="80" height="55" rx="6" ry="6" fill="#0a0a1a" stroke="#e94560" stroke-width="1.5" stroke-opacity="0.6"/>
+      <circle cx="10" cy="8" r="2.5" fill="#e94560" opacity="0.8"/>
+      <circle cx="18" cy="8" r="2.5" fill="#e9a045" opacity="0.8"/>
+      <circle cx="26" cy="8" r="2.5" fill="#45e96a" opacity="0.8"/>
+      <g filter="url(#glow)" opacity="0.9">
+        <text x="8" y="25" font-family="monospace" font-size="8" fill="#45e96a">$ hermitclaw</text>
+        <text x="8" y="35" font-family="monospace" font-size="7" fill="#e94560">&#x276F; ready</text>
+        <rect x="8" y="40" width="4" height="8" fill="#45e96a" opacity="0.8">
+          <animate attributeName="opacity" values="0.8;0.2;0.8" dur="1.2s" repeatCount="indefinite"/>
+        </rect>
+      </g>
+    </g>
+
+    <!-- Body -->
+    <ellipse cx="220" cy="395" rx="65" ry="35" fill="url(#bodyGrad)" filter="url(#shadow)"/>
+
+    <!-- Eye stalks -->
+    <path d="M 200 375 Q 185 340, 175 325" stroke="#533483" stroke-width="8" fill="none" stroke-linecap="round"/>
+    <path d="M 215 370 Q 210 335, 215 320" stroke="#533483" stroke-width="8" fill="none" stroke-linecap="round"/>
+    <!-- Eyes -->
+    <circle cx="173" cy="322" r="10" fill="#1a1a2e" stroke="#533483" stroke-width="2"/>
+    <circle cx="213" cy="317" r="10" fill="#1a1a2e" stroke="#533483" stroke-width="2"/>
+    <circle cx="175" cy="321" r="5" fill="#e94560" filter="url(#glow)"/>
+    <circle cx="215" cy="316" r="5" fill="#e94560" filter="url(#glow)"/>
+    <circle cx="177" cy="319" r="2" fill="#fff" opacity="0.7"/>
+    <circle cx="217" cy="314" r="2" fill="#fff" opacity="0.7"/>
+
+    <!-- Left claw (big) -->
+    <g filter="url(#shadow)">
+      <path d="
+        M 155 400
+        C 130 385, 80 370, 60 340
+        C 45 315, 50 285, 75 275
+        C 95 267, 110 280, 105 295
+      " fill="url(#clawGrad)" stroke="#a83242" stroke-width="2"/>
+      <path d="
+        M 155 405
+        C 130 410, 80 400, 62 375
+        C 48 355, 55 330, 70 320
+        C 80 313, 95 318, 100 330
+      " fill="url(#clawGrad)" stroke="#a83242" stroke-width="2"/>
+      <circle cx="155" cy="402" r="12" fill="#a83242"/>
+    </g>
+
+    <!-- Right claw (small) -->
+    <g filter="url(#shadow)">
+      <path d="
+        M 280 405
+        C 300 395, 330 385, 345 370
+        C 355 358, 352 340, 340 335
+        C 328 330, 320 340, 325 350
+      " fill="url(#clawGrad)" stroke="#a83242" stroke-width="1.5"/>
+      <path d="
+        M 280 410
+        C 300 412, 335 400, 348 385
+        C 358 373, 352 358, 340 355
+        C 330 352, 325 360, 330 370
+      " fill="url(#clawGrad)" stroke="#a83242" stroke-width="1.5"/>
+      <circle cx="280" cy="407" r="9" fill="#a83242"/>
+    </g>
+
+    <!-- Legs -->
+    <g stroke="#3a1f5e" stroke-width="5" fill="none" stroke-linecap="round">
+      <path d="M 175 415 Q 155 440, 135 455"/>
+      <path d="M 185 420 Q 165 450, 145 470"/>
+      <path d="M 195 425 Q 180 455, 165 478"/>
+      <path d="M 255 420 Q 270 448, 285 460"/>
+      <path d="M 248 425 Q 260 453, 275 472"/>
+      <path d="M 240 428 Q 248 458, 258 478"/>
+    </g>
+
+    <!-- Shield icon -->
+    <g transform="translate(340, 260)" filter="url(#glow)">
+      <path d="
+        M 0 -18
+        L 15 -10 L 15 5
+        C 15 15, 0 22, 0 22
+        C 0 22, -15 15, -15 5
+        L -15 -10 Z
+      " fill="none" stroke="#45e96a" stroke-width="2" opacity="0.8"/>
+      <path d="M -5 2 L -1 7 L 7 -4" fill="none" stroke="#45e96a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/>
+    </g>
+
+  </g>
+
+  <!-- ========== TEXT (right side) ========== -->
+
+  <!-- "Hermit" in bold weight -->
+  <text x="480" y="195" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="96" font-weight="300" fill="#ffffff" letter-spacing="-2" filter="url(#textGlow)">Hermit</text>
+  <!-- "Claw" in accent color -->
+  <text x="805" y="195" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="96" font-weight="700" fill="url(#textGrad)" letter-spacing="-2" filter="url(#textGlow)">Claw</text>
+
+  <!-- Tagline -->
+  <text x="485" y="240" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="22" fill="#8892a8" letter-spacing="3">THE HERMIT NEEDS NO NETWORK</text>
+
+  <!-- Separator line -->
+  <line x1="485" y1="260" x2="700" y2="260" stroke="#e94560" stroke-width="2" stroke-opacity="0.5"/>
+
+  <!-- Feature pills -->
+  <!-- Offline -->
+  <g transform="translate(485, 280)">
+    <rect x="0" y="0" width="100" height="30" rx="15" fill="#e94560" fill-opacity="0.15" stroke="#e94560" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="50" y="20" font-family="'Segoe UI', monospace" font-size="13" fill="#e94560" text-anchor="middle" font-weight="600">Offline</text>
+  </g>
+  <!-- Secure -->
+  <g transform="translate(600, 280)">
+    <rect x="0" y="0" width="100" height="30" rx="15" fill="#45e96a" fill-opacity="0.12" stroke="#45e96a" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="50" y="20" font-family="'Segoe UI', monospace" font-size="13" fill="#45e96a" text-anchor="middle" font-weight="600">Secure</text>
+  </g>
+  <!-- Rust -->
+  <g transform="translate(715, 280)">
+    <rect x="0" y="0" width="100" height="30" rx="15" fill="#e9a045" fill-opacity="0.12" stroke="#e9a045" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="50" y="20" font-family="'Segoe UI', monospace" font-size="13" fill="#e9a045" text-anchor="middle" font-weight="600">Rust</text>
+  </g>
+  <!-- MCP -->
+  <g transform="translate(830, 280)">
+    <rect x="0" y="0" width="100" height="30" rx="15" fill="#a78bfa" fill-opacity="0.12" stroke="#a78bfa" stroke-width="1" stroke-opacity="0.4"/>
+    <text x="50" y="20" font-family="'Segoe UI', monospace" font-size="13" fill="#a78bfa" text-anchor="middle" font-weight="600">MCP</text>
+  </g>
+
+  <!-- Subtle version tag -->
+  <text x="485" y="345" font-family="monospace" font-size="14" fill="#4a5270" letter-spacing="1">v0.1.0 — AI coding agent powered by local LLMs</text>
+</svg>
