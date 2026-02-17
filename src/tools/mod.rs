@@ -1,3 +1,4 @@
+pub mod apply_diff;
 pub mod edit_file;
 pub mod git;
 pub mod grep;
@@ -97,6 +98,7 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Box::new(edit_file::EditFileTool));
     registry.register(Box::new(git::GitTool));
     registry.register(Box::new(repo_map::RepoMapTool));
+    registry.register(Box::new(apply_diff::ApplyDiffTool));
     registry
 }
 
@@ -109,7 +111,7 @@ mod tests {
     fn test_registry_register_and_list() {
         let registry = default_registry();
         let tools = registry.list();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
     }
 
     #[test]
@@ -123,6 +125,7 @@ mod tests {
         assert!(registry.get("edit_file").is_some());
         assert!(registry.get("git").is_some());
         assert!(registry.get("repo_map").is_some());
+        assert!(registry.get("apply_diff").is_some());
         assert!(registry.get("nonexistent").is_none());
     }
 
@@ -130,7 +133,7 @@ mod tests {
     fn test_registry_definitions() {
         let registry = default_registry();
         let defs = registry.definitions();
-        assert_eq!(defs.len(), 8);
+        assert_eq!(defs.len(), 9);
         for def in &defs {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());
@@ -245,6 +248,7 @@ mod tests {
         // Moderate tools
         assert_eq!(registry.get("write_file").unwrap().risk_level(), ToolRiskLevel::Moderate);
         assert_eq!(registry.get("edit_file").unwrap().risk_level(), ToolRiskLevel::Moderate);
+        assert_eq!(registry.get("apply_diff").unwrap().risk_level(), ToolRiskLevel::Moderate);
         // Dangerous tools
         assert_eq!(registry.get("shell").unwrap().risk_level(), ToolRiskLevel::Dangerous);
         assert_eq!(registry.get("git").unwrap().risk_level(), ToolRiskLevel::Dangerous);

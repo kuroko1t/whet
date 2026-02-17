@@ -9,5 +9,6 @@ Available tools:
 - shell: Execute a shell command
 - grep: Search for a text pattern in files recursively (skips .git, target, node_modules)
 - git: Execute safe git commands (status, diff, log, add, commit, branch, show, stash)
-- repo_map: Show project structure with function/class/type definitions".to_string()
+- repo_map: Show project structure with function/class/type definitions
+- apply_diff: Apply a unified diff/patch to a file (supports multi-hunk patches)".to_string()
 }
