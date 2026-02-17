@@ -23,6 +23,7 @@ const SKIP_DIRS: &[&str] = &[
 
 const SOURCE_EXTENSIONS: &[&str] = &[
     "rs", "py", "js", "ts", "go", "java", "c", "cpp", "h", "tsx", "jsx",
+    "rb", "kt", "kts",
 ];
 
 impl Tool for RepoMapTool {
@@ -162,8 +163,9 @@ fn extract_symbols(path: &Path) -> Vec<String> {
 
     let mut symbols = Vec::new();
 
-    for line in content.lines() {
+    for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
+        let indent = line.len() - line.trim_start().len();
         let symbol = match ext {
             "rs" => extract_rust_symbol(trimmed),
             "py" => extract_python_symbol(trimmed),
@@ -171,10 +173,14 @@ fn extract_symbols(path: &Path) -> Vec<String> {
             "go" => extract_go_symbol(trimmed),
             "java" => extract_java_symbol(trimmed),
             "c" | "cpp" | "h" => extract_c_symbol(trimmed),
+            "rb" => extract_ruby_symbol(trimmed),
+            "kt" | "kts" => extract_kotlin_symbol(trimmed),
             _ => None,
         };
         if let Some(s) = symbol {
-            symbols.push(s);
+            // Add line number and indentation hint for nested symbols
+            let prefix = if indent > 0 { "  " } else { "" };
+            symbols.push(format!("{}L{}: {}", prefix, line_num + 1, s));
         }
     }
 
@@ -183,8 +189,17 @@ fn extract_symbols(path: &Path) -> Vec<String> {
 
 fn extract_rust_symbol(line: &str) -> Option<String> {
     let prefixes = [
-        "pub fn ", "fn ", "pub struct ", "struct ", "pub enum ", "enum ", "pub trait ", "trait ",
-        "impl ", "pub mod ", "mod ",
+        "pub fn ", "fn ", "pub(crate) fn ", "pub(super) fn ",
+        "pub async fn ", "async fn ", "pub const fn ", "const fn ",
+        "pub unsafe fn ", "unsafe fn ",
+        "pub struct ", "struct ", "pub(crate) struct ",
+        "pub enum ", "enum ", "pub(crate) enum ",
+        "pub trait ", "trait ", "pub(crate) trait ",
+        "impl ", "pub mod ", "mod ", "pub(crate) mod ",
+        "pub type ", "type ", "pub(crate) type ",
+        "pub const ", "const ",
+        "pub static ", "static ",
+        "macro_rules! ",
     ];
     for prefix in &prefixes {
         if line.starts_with(prefix) {
@@ -271,6 +286,34 @@ fn extract_c_symbol(line: &str) -> Option<String> {
     // struct/enum/typedef
     if line.starts_with("struct ") || line.starts_with("enum ") || line.starts_with("typedef ") {
         return Some(extract_signature(line));
+    }
+    None
+}
+
+fn extract_ruby_symbol(line: &str) -> Option<String> {
+    let prefixes = [
+        "class ", "module ", "def ", "attr_reader ", "attr_writer ", "attr_accessor ",
+    ];
+    for prefix in &prefixes {
+        if line.starts_with(prefix) {
+            return Some(extract_signature(line));
+        }
+    }
+    None
+}
+
+fn extract_kotlin_symbol(line: &str) -> Option<String> {
+    let prefixes = [
+        "fun ", "class ", "data class ", "sealed class ", "object ", "interface ",
+        "enum class ", "abstract class ", "open class ",
+        "val ", "var ",
+        "suspend fun ", "inline fun ", "private fun ", "internal fun ",
+        "override fun ", "protected fun ",
+    ];
+    for prefix in &prefixes {
+        if line.starts_with(prefix) {
+            return Some(extract_signature(line));
+        }
     }
     None
 }
@@ -518,8 +561,71 @@ mod tests {
         assert!(is_source_file(Path::new("main.cpp")));
         assert!(is_source_file(Path::new("header.h")));
         assert!(is_source_file(Path::new("App.java")));
+        assert!(is_source_file(Path::new("server.rb")));
+        assert!(is_source_file(Path::new("app.kt")));
+        assert!(is_source_file(Path::new("build.gradle.kts")));
         assert!(!is_source_file(Path::new("no_extension")));
         assert!(!is_source_file(Path::new(".hidden")));
+    }
+
+    #[test]
+    fn test_extract_rust_advanced_symbols() {
+        // pub(crate)
+        assert!(extract_rust_symbol("pub(crate) fn helper()").is_some());
+        assert!(extract_rust_symbol("pub(super) fn parent()").is_some());
+        // async/const/unsafe fn
+        assert!(extract_rust_symbol("pub async fn fetch()").is_some());
+        assert!(extract_rust_symbol("async fn do_stuff()").is_some());
+        assert!(extract_rust_symbol("pub const fn size()").is_some());
+        assert!(extract_rust_symbol("const fn zero()").is_some());
+        assert!(extract_rust_symbol("pub unsafe fn raw_ptr()").is_some());
+        assert!(extract_rust_symbol("unsafe fn danger()").is_some());
+        // type alias, const, static
+        assert!(extract_rust_symbol("pub type Result<T> = std::result::Result<T, Error>;").is_some());
+        assert!(extract_rust_symbol("pub const MAX: usize = 100;").is_some());
+        assert!(extract_rust_symbol("pub static INSTANCE: Lazy<Foo> = Lazy::new(|| Foo);").is_some());
+        // macro_rules
+        assert!(extract_rust_symbol("macro_rules! my_macro {").is_some());
+    }
+
+    #[test]
+    fn test_extract_ruby_symbols() {
+        assert!(extract_ruby_symbol("class MyClass").is_some());
+        assert!(extract_ruby_symbol("module MyModule").is_some());
+        assert!(extract_ruby_symbol("def initialize(name)").is_some());
+        assert!(extract_ruby_symbol("attr_reader :name").is_some());
+        assert_eq!(extract_ruby_symbol("  x = 5"), None);
+    }
+
+    #[test]
+    fn test_extract_kotlin_symbols() {
+        assert!(extract_kotlin_symbol("fun main(args: Array<String>) {").is_some());
+        assert!(extract_kotlin_symbol("class MyClass {").is_some());
+        assert!(extract_kotlin_symbol("data class User(val name: String)").is_some());
+        assert!(extract_kotlin_symbol("sealed class Result {").is_some());
+        assert!(extract_kotlin_symbol("object Singleton {").is_some());
+        assert!(extract_kotlin_symbol("interface Callback {").is_some());
+        assert!(extract_kotlin_symbol("enum class Color {").is_some());
+        assert!(extract_kotlin_symbol("suspend fun fetch()").is_some());
+        assert_eq!(extract_kotlin_symbol("    val x = 5"), None);
+    }
+
+    #[test]
+    fn test_symbols_include_line_numbers() {
+        let dir = "/tmp/hermitclaw_test_repo_map_lineno";
+        std::fs::create_dir_all(dir).ok();
+        std::fs::write(
+            format!("{}/test.rs", dir),
+            "// comment\nfn hello() {\n}\n\npub struct Foo {\n}\n",
+        )
+        .unwrap();
+
+        let tool = RepoMapTool;
+        let result = tool.execute(json!({"path": dir})).unwrap();
+        assert!(result.contains("L2:"), "Should contain line number for fn hello");
+        assert!(result.contains("L5:"), "Should contain line number for struct Foo");
+
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
