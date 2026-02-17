@@ -78,3 +78,79 @@ impl Default for ToolRegistry {
         Self::new()
     }
 }
+
+/// Create a ToolRegistry with all built-in tools registered.
+pub fn default_registry() -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(read_file::ReadFileTool));
+    registry.register(Box::new(list_dir::ListDirTool));
+    registry.register(Box::new(write_file::WriteFileTool));
+    registry.register(Box::new(shell::ShellTool));
+    registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_registry_register_and_list() {
+        let registry = default_registry();
+        let tools = registry.list();
+        assert_eq!(tools.len(), 4);
+    }
+
+    #[test]
+    fn test_registry_get_by_name() {
+        let registry = default_registry();
+        assert!(registry.get("read_file").is_some());
+        assert!(registry.get("list_dir").is_some());
+        assert!(registry.get("write_file").is_some());
+        assert!(registry.get("shell").is_some());
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_registry_definitions() {
+        let registry = default_registry();
+        let defs = registry.definitions();
+        assert_eq!(defs.len(), 4);
+        for def in &defs {
+            assert!(!def.name.is_empty());
+            assert!(!def.description.is_empty());
+            assert!(def.parameters.is_object());
+        }
+    }
+
+    #[test]
+    fn test_read_file_tool() {
+        let tool = read_file::ReadFileTool;
+        let result = tool.execute(json!({"path": "Cargo.toml"}));
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("hermitclaw"));
+    }
+
+    #[test]
+    fn test_read_file_tool_missing() {
+        let tool = read_file::ReadFileTool;
+        let result = tool.execute(json!({"path": "/nonexistent/file.txt"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_list_dir_tool() {
+        let tool = list_dir::ListDirTool;
+        let result = tool.execute(json!({"path": "src"}));
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("main.rs"));
+    }
+
+    #[test]
+    fn test_list_dir_tool_missing() {
+        let tool = list_dir::ListDirTool;
+        let result = tool.execute(json!({"path": "/nonexistent/dir"}));
+        assert!(result.is_err());
+    }
+}
