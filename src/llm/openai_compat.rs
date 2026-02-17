@@ -72,14 +72,15 @@ struct ChatChoice {
 
 impl OpenAiCompatClient {
     pub fn new(base_url: &str, model: &str, api_key: Option<String>) -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key,
-            client: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
-                .build()
-                .expect("Failed to create HTTP client"),
+            client,
         }
     }
 

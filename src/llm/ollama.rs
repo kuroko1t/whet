@@ -62,13 +62,14 @@ struct OllamaChatResponse {
 
 impl OllamaClient {
     pub fn new(base_url: &str, model: &str) -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new());
         Self {
             base_url: base_url.to_string(),
             model: model.to_string(),
-            client: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
-                .build()
-                .expect("Failed to create HTTP client"),
+            client,
         }
     }
 

@@ -209,7 +209,9 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
                 _ => {
                     println!("No previous conversation found. Starting new.\n");
                     let id = uuid::Uuid::new_v4().to_string();
-                    let _ = store.create_conversation(&id);
+                    if let Err(e) = store.create_conversation(&id) {
+                        eprintln!("{} Failed to create conversation: {}", "Warning:".yellow(), e);
+                    }
                     id
                 }
             }
@@ -219,13 +221,25 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
     } else {
         let id = uuid::Uuid::new_v4().to_string();
         if let Some(ref store) = store {
-            let _ = store.create_conversation(&id);
+            if let Err(e) = store.create_conversation(&id) {
+                eprintln!("{} Failed to create conversation: {}", "Warning:".yellow(), e);
+            }
         }
         id
     };
 
     let mut current_model = model;
-    let mut rl = rustyline::DefaultEditor::new().expect("Failed to initialize readline");
+    let mut rl = match rustyline::DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(e) => {
+            eprintln!(
+                "{} Failed to initialize readline: {}",
+                "Error:".red(),
+                e
+            );
+            return;
+        }
+    };
 
     loop {
         let readline = rl.readline(&format!("{} ", "you>".blue().bold()));
@@ -251,7 +265,9 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
 
                 // Save user message
                 if let Some(ref store) = store {
-                    let _ = store.save_message(&conversation_id, "user", input, None);
+                    if let Err(e) = store.save_message(&conversation_id, "user", input, None) {
+                        eprintln!("{} Failed to save message: {}", "Warning:".yellow(), e);
+                    }
                 }
 
                 let start = std::time::Instant::now();
@@ -284,8 +300,9 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
 
                 // Save assistant response
                 if let Some(ref store) = store {
-                    let _ =
-                        store.save_message(&conversation_id, "assistant", &response, None);
+                    if let Err(e) = store.save_message(&conversation_id, "assistant", &response, None) {
+                        eprintln!("{} Failed to save message: {}", "Warning:".yellow(), e);
+                    }
                 }
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {

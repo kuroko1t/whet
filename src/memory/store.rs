@@ -19,7 +19,9 @@ impl MemoryStore {
 
         // Create parent directory if needed
         if let Some(parent) = std::path::Path::new(&expanded).parent() {
-            std::fs::create_dir_all(parent).ok();
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("Warning: Failed to create directory {}: {}", parent.display(), e);
+            }
         }
 
         let conn = Connection::open(&expanded)?;
@@ -29,6 +31,7 @@ impl MemoryStore {
     }
 
     /// Create an in-memory store (for testing).
+    #[allow(dead_code)]
     pub fn in_memory() -> SqliteResult<Self> {
         let conn = Connection::open_in_memory()?;
         let store = Self { conn };

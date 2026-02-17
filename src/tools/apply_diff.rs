@@ -178,7 +178,12 @@ fn apply_hunks(content: &str, hunks: &[DiffHunk]) -> Result<String, ToolError> {
 
     // Hunks should be applied in order (top to bottom)
     for hunk in hunks {
-        let hunk_start = if hunk.old_start == 0 { 0 } else { hunk.old_start - 1 }; // Convert to 0-based
+        if hunk.old_start == 0 {
+            return Err(ToolError::InvalidArguments(
+                "Invalid hunk: old_start must be >= 1 in unified diff format".to_string(),
+            ));
+        }
+        let hunk_start = hunk.old_start - 1; // Convert to 0-based
 
         // Copy all lines before this hunk
         while current_line < hunk_start && current_line < original_lines.len() {
@@ -191,7 +196,7 @@ fn apply_hunks(content: &str, hunks: &[DiffHunk]) -> Result<String, ToolError> {
         for diff_line in &hunk.lines {
             match diff_line {
                 DiffLine::Context(text) => {
-                    // Verify context matches
+                    // Verify context matches, then preserve the original line
                     if current_line < original_lines.len() {
                         let orig = original_lines[current_line];
                         if orig.trim() != text.trim() && !text.is_empty() {
@@ -202,8 +207,11 @@ fn apply_hunks(content: &str, hunks: &[DiffHunk]) -> Result<String, ToolError> {
                                 orig
                             )));
                         }
+                        // Use the original file's line to preserve exact whitespace
+                        result_lines.push(orig.to_string());
+                    } else {
+                        result_lines.push(text.clone());
                     }
-                    result_lines.push(text.clone());
                     current_line += 1;
                     old_consumed += 1;
                 }
@@ -420,6 +428,44 @@ mod tests {
             tool.execute(json!({"diff": "@@ -1,1 +1,1 @@\n-a\n+b"})).unwrap_err(),
             ToolError::InvalidArguments(_)
         ));
+    }
+
+    #[test]
+    fn test_apply_diff_old_start_zero_rejected() {
+        let path = "/tmp/hermitclaw_test_diff_zero.txt";
+        setup_test_file(path, "line1\nline2\n");
+
+        let tool = ApplyDiffTool;
+        let result = tool.execute(json!({
+            "path": path,
+            "diff": "@@ -0,1 +0,1 @@\n-line1\n+changed"
+        }));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("old_start must be >= 1"));
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_apply_diff_preserves_original_whitespace() {
+        // Context lines should preserve the original file's whitespace, not the diff's
+        let path = "/tmp/hermitclaw_test_diff_ws.txt";
+        setup_test_file(path, "  indented\nnormal\n  also indented\n");
+
+        let tool = ApplyDiffTool;
+        let result = tool.execute(json!({
+            "path": path,
+            "diff": "@@ -1,3 +1,3 @@\n   indented\n-normal\n+CHANGED\n   also indented"
+        })).unwrap();
+
+        assert!(result.contains("1 hunk(s)"));
+        let content = std::fs::read_to_string(path).unwrap();
+        // Should preserve original "  indented" (2 spaces), not diff's "  indented" (which might differ)
+        assert!(content.starts_with("  indented\n"));
+        assert!(content.contains("CHANGED"));
+
+        cleanup(path);
     }
 
     #[test]

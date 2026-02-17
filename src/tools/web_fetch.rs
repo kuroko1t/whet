@@ -124,9 +124,10 @@ fn html_to_text(html: &str) -> String {
                     in_style = true;
                 } else if lower == "/style" {
                     in_style = false;
-                } else if lower == "br" || lower == "br/" || lower.starts_with("br ") {
-                    text.push('\n');
-                } else if lower == "p"
+                } else if lower == "br"
+                    || lower == "br/"
+                    || lower.starts_with("br ")
+                    || lower == "p"
                     || lower == "/p"
                     || lower == "div"
                     || lower == "/div"

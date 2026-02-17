@@ -61,6 +61,15 @@ impl Tool for ShellTool {
             result.push_str(&stderr);
         }
 
+        // Append exit code so the agent can distinguish success from failure
+        let exit_code = output.status.code().unwrap_or(-1);
+        if exit_code != 0 {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&format!("[exit code: {}]", exit_code));
+        }
+
         Ok(result)
     }
 
@@ -124,12 +133,17 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_failing_command() {
+    fn test_shell_failing_command_reports_exit_code() {
         let tool = ShellTool;
-        // `false` command returns exit code 1, but we capture output anyway
-        let result = tool.execute(json!({"command": "false"}));
-        // Should succeed (we return stdout/stderr, not propagate exit code)
-        assert!(result.is_ok());
+        let result = tool.execute(json!({"command": "false"})).unwrap();
+        assert!(result.contains("[exit code: 1]"));
+    }
+
+    #[test]
+    fn test_shell_success_no_exit_code_shown() {
+        let tool = ShellTool;
+        let result = tool.execute(json!({"command": "true"})).unwrap();
+        assert!(!result.contains("[exit code"));
     }
 
     #[test]

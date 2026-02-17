@@ -129,6 +129,22 @@ mod tests {
     }
 
     #[test]
+    fn test_write_path_traversal_blocked() {
+        let tool = WriteFileTool;
+        let result = tool.execute(json!({"path": "/tmp/../etc/shadow", "content": "bad"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn test_write_ssh_key_blocked() {
+        let tool = WriteFileTool;
+        let result = tool.execute(json!({"path": "~/.ssh/id_rsa", "content": "bad"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+    }
+
+    #[test]
     fn test_write_empty_content() {
         let tool = WriteFileTool;
         let path = "/tmp/hermitclaw_test_empty.txt";

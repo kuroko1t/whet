@@ -9,6 +9,7 @@ pub struct McpClient {
     reader: BufReader<std::process::ChildStdout>,
     writer: std::process::ChildStdin,
     next_id: u64,
+    #[allow(dead_code)]
     pub server_name: String,
 }
 

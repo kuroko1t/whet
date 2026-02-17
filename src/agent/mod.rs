@@ -13,6 +13,7 @@ pub struct Agent {
 }
 
 pub struct AgentConfig {
+    #[allow(dead_code)]
     pub model: String,
     pub max_iterations: usize,
     pub permission_mode: PermissionMode,
@@ -36,8 +37,7 @@ impl Agent {
         tools: ToolRegistry,
         config: AgentConfig,
     ) -> Self {
-        let mut memory = Vec::new();
-        memory.push(Message::system(&prompt::system_prompt()));
+        let memory = vec![Message::system(&prompt::system_prompt())];
         Self {
             llm,
             tools,
@@ -46,10 +46,12 @@ impl Agent {
         }
     }
 
+    #[allow(dead_code)]
     pub fn process_message(&mut self, user_input: &str) -> String {
         self.process_message_with_callbacks(user_input, &mut |_| {}, &mut |_, _| true)
     }
 
+    #[allow(dead_code)]
     pub fn process_message_with_callback(
         &mut self,
         user_input: &str,

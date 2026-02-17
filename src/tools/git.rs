@@ -64,10 +64,14 @@ impl Tool for GitTool {
         }
 
         // Special check: commit requires -m flag to prevent interactive editor
-        if command == "commit" && !extra_args.contains("-m") {
-            return Err(ToolError::InvalidArguments(
-                "git commit requires -m flag (e.g., args: \"-m 'commit message'\"). Interactive editor is not supported.".to_string(),
-            ));
+        if command == "commit" {
+            let parsed_args = shell_split(extra_args);
+            let has_m_flag = parsed_args.iter().any(|a| a == "-m" || a.starts_with("-m"));
+            if !has_m_flag {
+                return Err(ToolError::InvalidArguments(
+                    "git commit requires -m flag (e.g., args: \"-m 'commit message'\"). Interactive editor is not supported.".to_string(),
+                ));
+            }
         }
 
         let mut cmd = Command::new("git");
@@ -265,6 +269,16 @@ mod tests {
                 cmd
             );
         }
+    }
+
+    #[test]
+    fn test_git_commit_without_m_false_positive_rejected() {
+        // Args like "--allow-multiple" should NOT satisfy the -m requirement
+        let tool = GitTool;
+        let result = tool.execute(json!({"command": "commit", "args": "--allow-multiple"}));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("-m flag"));
     }
 
     #[test]

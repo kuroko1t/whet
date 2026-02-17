@@ -11,21 +11,16 @@ pub struct Config {
 }
 
 /// Permission mode controlling when user approval is required for tool execution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
     /// Ask for approval on all file-modifying and command-executing tools
+    #[default]
     Default,
     /// Auto-approve file edits, ask only for shell/git execution
     AcceptEdits,
     /// No confirmation needed for any tool
     Yolo,
-}
-
-impl std::default::Default for PermissionMode {
-    fn default() -> Self {
-        PermissionMode::Default
-    }
 }
 
 impl fmt::Display for PermissionMode {
@@ -113,11 +108,13 @@ impl Default for Config {
 
 impl Config {
     /// Parse config from a TOML string.
+    #[allow(dead_code)]
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
     }
 
     /// Serialize config to TOML string.
+    #[allow(dead_code)]
     pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
         toml::to_string_pretty(self)
     }

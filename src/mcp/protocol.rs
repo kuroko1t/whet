@@ -53,6 +53,7 @@ pub struct JsonRpcResponse {
 
 #[derive(Deserialize, Debug)]
 pub struct JsonRpcError {
+    #[allow(dead_code)]
     pub code: i64,
     pub message: String,
 }
@@ -79,6 +80,7 @@ pub struct McpToolCallResult {
 #[derive(Deserialize, Debug)]
 pub struct McpContent {
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     pub content_type: String,
     #[serde(default)]
     pub text: Option<String>,

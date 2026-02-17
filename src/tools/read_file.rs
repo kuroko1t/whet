@@ -105,6 +105,34 @@ mod tests {
     }
 
     #[test]
+    fn test_read_path_traversal_blocked() {
+        let tool = ReadFileTool;
+        // Attempt to reach /etc/shadow via path traversal
+        let result = tool.execute(json!({"path": "/tmp/../etc/shadow"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn test_read_path_traversal_deep() {
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({"path": "/tmp/../../etc/shadow"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn test_read_ssh_via_absolute_home_path() {
+        let tool = ReadFileTool;
+        if let Some(home) = dirs::home_dir() {
+            let path = format!("{}/.ssh/id_rsa", home.display());
+            let result = tool.execute(json!({"path": path}));
+            assert!(result.is_err());
+            assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+        }
+    }
+
+    #[test]
     fn test_read_write_roundtrip() {
         // Write a file, then read it back
         let path = "/tmp/hermitclaw_test_roundtrip.txt";
