@@ -1,5 +1,9 @@
+pub mod edit_file;
+pub mod git;
+pub mod grep;
 pub mod list_dir;
 pub mod read_file;
+pub mod repo_map;
 pub mod shell;
 pub mod write_file;
 
@@ -25,19 +29,11 @@ impl fmt::Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
-pub struct ToolPermissions {
-    pub filesystem_read: bool,
-    pub filesystem_write: bool,
-    pub network: bool,
-    pub subprocess: bool,
-}
-
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> serde_json::Value;
     fn execute(&self, args: serde_json::Value) -> Result<String, ToolError>;
-    fn permissions(&self) -> ToolPermissions;
 }
 
 pub struct ToolRegistry {
@@ -86,6 +82,10 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Box::new(list_dir::ListDirTool));
     registry.register(Box::new(write_file::WriteFileTool));
     registry.register(Box::new(shell::ShellTool));
+    registry.register(Box::new(grep::GrepTool));
+    registry.register(Box::new(edit_file::EditFileTool));
+    registry.register(Box::new(git::GitTool));
+    registry.register(Box::new(repo_map::RepoMapTool));
     registry
 }
 
@@ -98,7 +98,7 @@ mod tests {
     fn test_registry_register_and_list() {
         let registry = default_registry();
         let tools = registry.list();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 8);
     }
 
     #[test]
@@ -108,6 +108,10 @@ mod tests {
         assert!(registry.get("list_dir").is_some());
         assert!(registry.get("write_file").is_some());
         assert!(registry.get("shell").is_some());
+        assert!(registry.get("grep").is_some());
+        assert!(registry.get("edit_file").is_some());
+        assert!(registry.get("git").is_some());
+        assert!(registry.get("repo_map").is_some());
         assert!(registry.get("nonexistent").is_none());
     }
 
@@ -115,7 +119,7 @@ mod tests {
     fn test_registry_definitions() {
         let registry = default_registry();
         let defs = registry.definitions();
-        assert_eq!(defs.len(), 4);
+        assert_eq!(defs.len(), 8);
         for def in &defs {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());
@@ -152,5 +156,68 @@ mod tests {
         let tool = list_dir::ListDirTool;
         let result = tool.execute(json!({"path": "/nonexistent/dir"}));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tool_error_display_messages() {
+        let err = ToolError::InvalidArguments("bad arg".to_string());
+        assert_eq!(err.to_string(), "Invalid arguments: bad arg");
+
+        let err = ToolError::ExecutionFailed("cmd failed".to_string());
+        assert_eq!(err.to_string(), "Execution failed: cmd failed");
+
+        let err = ToolError::PermissionDenied("no access".to_string());
+        assert_eq!(err.to_string(), "Permission denied: no access");
+    }
+
+    #[test]
+    fn test_tool_error_is_std_error() {
+        let err: Box<dyn std::error::Error> =
+            Box::new(ToolError::ExecutionFailed("test".to_string()));
+        assert!(err.to_string().contains("test"));
+    }
+
+    #[test]
+    fn test_registry_empty() {
+        let registry = ToolRegistry::new();
+        assert_eq!(registry.list().len(), 0);
+        assert!(registry.get("anything").is_none());
+        assert_eq!(registry.definitions().len(), 0);
+    }
+
+    #[test]
+    fn test_registry_default_is_empty() {
+        let registry = ToolRegistry::default();
+        assert_eq!(registry.list().len(), 0);
+    }
+
+    #[test]
+    fn test_all_tools_have_valid_schemas() {
+        let registry = default_registry();
+        for tool in registry.list() {
+            let schema = tool.parameters_schema();
+            assert!(schema.is_object(), "Tool '{}' schema should be an object", tool.name());
+            assert_eq!(
+                schema["type"], "object",
+                "Tool '{}' schema type should be 'object'",
+                tool.name()
+            );
+            assert!(
+                schema.get("properties").is_some(),
+                "Tool '{}' schema should have 'properties'",
+                tool.name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_tool_names_are_unique() {
+        let registry = default_registry();
+        let tools = registry.list();
+        let mut names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        let original_len = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), original_len, "Tool names should be unique");
     }
 }
