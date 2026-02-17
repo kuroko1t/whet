@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Fully offline, secure-by-default AI agent. The hermit needs no network."
 license = "MIT"
-repository = "https://github.com/kuroko1t/clawbot"
+repository = "https://github.com/kuroko1t/hermitclaw"
 readme = "README.md"
 
 [dependencies]
