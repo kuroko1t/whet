@@ -80,3 +80,104 @@ fn list_entries(path: &str, recursive: bool, entries: &mut Vec<String>) -> Resul
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_list_src_directory() {
+        let tool = ListDirTool;
+        let result = tool.execute(json!({"path": "src"})).unwrap();
+        assert!(result.contains("main.rs"));
+        assert!(result.contains("lib.rs"));
+    }
+
+    #[test]
+    fn test_list_nonexistent_directory() {
+        let tool = ListDirTool;
+        let result = tool.execute(json!({"path": "/nonexistent_dir_xyz"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_list_recursive() {
+        let tool = ListDirTool;
+        let result = tool
+            .execute(json!({"path": "src", "recursive": true}))
+            .unwrap();
+        // Recursive should find files inside subdirectories
+        assert!(result.contains("main.rs"));
+        assert!(result.contains("ollama.rs"));
+        assert!(result.contains("prompt.rs"));
+    }
+
+    #[test]
+    fn test_list_non_recursive_default() {
+        let tool = ListDirTool;
+        let result = tool.execute(json!({"path": "src"})).unwrap();
+        // Non-recursive should show top-level only
+        // llm/ is a directory, should have trailing /
+        assert!(result.contains("llm/") || result.contains("llm"));
+        // Should NOT contain files inside subdirectories
+        assert!(!result.contains("ollama.rs"));
+    }
+
+    #[test]
+    fn test_list_empty_directory() {
+        let dir = "/tmp/hermitclaw_test_empty_dir";
+        fs::create_dir_all(dir).ok();
+        // Remove all contents
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+
+        let tool = ListDirTool;
+        let result = tool.execute(json!({"path": dir})).unwrap();
+        assert!(result.is_empty());
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_list_directories_have_trailing_slash() {
+        let tool = ListDirTool;
+        let result = tool.execute(json!({"path": "src"})).unwrap();
+        // All subdirectories should end with /
+        for line in result.lines() {
+            if std::path::Path::new(line.trim_end_matches('/')).is_dir() {
+                assert!(line.ends_with('/'), "Directory entry should end with /: {}", line);
+            }
+        }
+    }
+
+    #[test]
+    fn test_list_missing_path_arg() {
+        let tool = ListDirTool;
+        let result = tool.execute(json!({}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn test_list_file_instead_of_dir() {
+        let tool = ListDirTool;
+        // Passing a file path instead of directory should fail
+        let result = tool.execute(json!({"path": "Cargo.toml"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_list_permissions() {
+        let tool = ListDirTool;
+        let perms = tool.permissions();
+        assert!(perms.filesystem_read);
+        assert!(!perms.filesystem_write);
+        assert!(!perms.network);
+        assert!(!perms.subprocess);
+    }
+}

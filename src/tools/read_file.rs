@@ -51,3 +51,88 @@ impl Tool for ReadFileTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_read_existing_file() {
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({"path": "Cargo.toml"})).unwrap();
+        assert!(result.contains("hermitclaw"));
+        assert!(result.contains("[package]"));
+    }
+
+    #[test]
+    fn test_read_nonexistent_file() {
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({"path": "/nonexistent/file.txt"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_read_blocked_etc_shadow() {
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({"path": "/etc/shadow"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn test_read_blocked_etc_gshadow() {
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({"path": "/etc/gshadow"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn test_read_blocked_sudoers() {
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({"path": "/etc/sudoers"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn test_read_missing_path_arg() {
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn test_read_directory_fails() {
+        let tool = ReadFileTool;
+        // Reading a directory should fail
+        let result = tool.execute(json!({"path": "src"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_write_roundtrip() {
+        // Write a file, then read it back
+        let path = "/tmp/hermitclaw_test_roundtrip.txt";
+        let content = "roundtrip test content\nline 2";
+        std::fs::write(path, content).unwrap();
+
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({"path": path})).unwrap();
+        assert_eq!(result, content);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_read_permissions() {
+        let tool = ReadFileTool;
+        let perms = tool.permissions();
+        assert!(perms.filesystem_read);
+        assert!(!perms.filesystem_write);
+        assert!(!perms.network);
+        assert!(!perms.subprocess);
+    }
+}

@@ -1,6 +1,6 @@
 pub mod prompt;
 
-use crate::llm::{LlmProvider, Message, Role};
+use crate::llm::{LlmProvider, Message};
 use crate::tools::ToolRegistry;
 use colored::Colorize;
 
@@ -94,5 +94,305 @@ impl Agent {
         }
 
         "Max iterations reached. The agent could not complete the task.".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::{LlmError, LlmResponse, Role, ToolCall, ToolDefinition};
+    use crate::tools::default_registry;
+    use std::cell::RefCell;
+
+    /// A mock LLM that returns pre-scripted responses in sequence.
+    struct MockLlm {
+        responses: RefCell<Vec<LlmResponse>>,
+    }
+
+    impl MockLlm {
+        fn new(responses: Vec<LlmResponse>) -> Self {
+            // Reverse so we can pop from the end
+            let mut r = responses;
+            r.reverse();
+            Self {
+                responses: RefCell::new(r),
+            }
+        }
+    }
+
+    impl LlmProvider for MockLlm {
+        fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<LlmResponse, LlmError> {
+            let mut responses = self.responses.borrow_mut();
+            if let Some(resp) = responses.pop() {
+                Ok(resp)
+            } else {
+                // If we run out of scripted responses, return empty content
+                Ok(LlmResponse {
+                    content: Some("(no more scripted responses)".to_string()),
+                    tool_calls: vec![],
+                })
+            }
+        }
+    }
+
+    /// A mock LLM that always returns an error.
+    struct ErrorLlm;
+
+    impl LlmProvider for ErrorLlm {
+        fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<LlmResponse, LlmError> {
+            Err(LlmError::ConnectionError(
+                "Cannot connect to Ollama".to_string(),
+            ))
+        }
+    }
+
+    fn make_agent(llm: Box<dyn LlmProvider>) -> Agent {
+        Agent::new(llm, default_registry(), AgentConfig::default())
+    }
+
+    #[test]
+    fn test_simple_text_response() {
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: Some("Hello! How can I help?".to_string()),
+            tool_calls: vec![],
+        }]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Hi there");
+        assert_eq!(response, "Hello! How can I help?");
+    }
+
+    #[test]
+    fn test_empty_content_response() {
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: None,
+            tool_calls: vec![],
+        }]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Hi");
+        // None content should become empty string
+        assert_eq!(response, "");
+    }
+
+    #[test]
+    fn test_tool_call_then_response() {
+        // First response: call read_file tool
+        // Second response: use tool result to answer
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "Cargo.toml"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("The project is named hermitclaw.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("What is this project?");
+        assert_eq!(response, "The project is named hermitclaw.");
+    }
+
+    #[test]
+    fn test_multiple_tool_calls_in_one_response() {
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![
+                    ToolCall {
+                        id: "call_0".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "Cargo.toml"}),
+                    },
+                    ToolCall {
+                        id: "call_1".to_string(),
+                        name: "list_dir".to_string(),
+                        arguments: serde_json::json!({"path": "src"}),
+                    },
+                ],
+            },
+            LlmResponse {
+                content: Some("I found 2 things.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Analyze the project");
+        assert_eq!(response, "I found 2 things.");
+
+        // Verify memory contains system + user + assistant(tool_calls) + 2 tool results + assistant
+        // system(1) + user(1) + assistant_tool_calls(1) + tool_result(2) + assistant(1) = 6
+        assert_eq!(agent.memory.len(), 6);
+    }
+
+    #[test]
+    fn test_unknown_tool_handled_gracefully() {
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "nonexistent_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Sorry, that tool doesn't exist.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Use nonexistent tool");
+        assert_eq!(response, "Sorry, that tool doesn't exist.");
+
+        // Check that "Unknown tool" message was stored in memory
+        let tool_result_msg = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have a tool result message");
+        assert!(tool_result_msg.content.contains("Unknown tool: nonexistent_tool"));
+    }
+
+    #[test]
+    fn test_tool_execution_error_handled() {
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "/nonexistent/file.txt"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("The file doesn't exist.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Read a missing file");
+        assert_eq!(response, "The file doesn't exist.");
+
+        // Check that error was stored as tool result
+        let tool_result_msg = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have a tool result message");
+        assert!(tool_result_msg.content.contains("Tool error:"));
+    }
+
+    #[test]
+    fn test_llm_error_returns_error_message() {
+        let mut agent = make_agent(Box::new(ErrorLlm));
+        let response = agent.process_message("Hello");
+        assert!(response.starts_with("Error:"));
+        assert!(response.contains("Cannot connect to Ollama"));
+    }
+
+    #[test]
+    fn test_max_iterations_reached() {
+        // LLM always returns tool calls, never a final response
+        let mut responses = Vec::new();
+        for _ in 0..15 {
+            responses.push(LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+            });
+        }
+        let llm = MockLlm::new(responses);
+
+        let config = AgentConfig {
+            max_iterations: 3,
+            ..AgentConfig::default()
+        };
+        let mut agent = Agent::new(Box::new(llm), default_registry(), config);
+        let response = agent.process_message("Keep using tools forever");
+        assert_eq!(
+            response,
+            "Max iterations reached. The agent could not complete the task."
+        );
+    }
+
+    #[test]
+    fn test_memory_accumulates_across_messages() {
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: Some("First response".to_string()),
+                tool_calls: vec![],
+            },
+            LlmResponse {
+                content: Some("Second response".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+
+        agent.process_message("First question");
+        // system + user + assistant = 3
+        assert_eq!(agent.memory.len(), 3);
+
+        agent.process_message("Second question");
+        // 3 + user + assistant = 5
+        assert_eq!(agent.memory.len(), 5);
+    }
+
+    #[test]
+    fn test_system_prompt_is_first_message() {
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: Some("ok".to_string()),
+            tool_calls: vec![],
+        }]);
+        let agent = make_agent(Box::new(llm));
+
+        assert_eq!(agent.memory.len(), 1);
+        assert_eq!(agent.memory[0].role, Role::System);
+        assert!(agent.memory[0].content.contains("hermitclaw"));
+    }
+
+    #[test]
+    fn test_tool_call_with_content_alongside() {
+        // LLM returns both tool_calls AND content in the same response
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: Some("Let me check that file.".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "Cargo.toml"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Done reading.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Check Cargo.toml");
+        assert_eq!(response, "Done reading.");
+
+        // Memory should have: system + user + assistant_tool_calls + tool_result + assistant("Let me check") + assistant("Done reading")
+        let assistant_messages: Vec<_> = agent
+            .memory
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .collect();
+        assert!(assistant_messages.len() >= 2);
     }
 }

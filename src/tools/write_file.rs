@@ -60,3 +60,102 @@ impl Tool for WriteFileTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_write_and_verify() {
+        let tool = WriteFileTool;
+        let path = "/tmp/hermitclaw_test_write.txt";
+        let content = "hello from hermitclaw test";
+        let result = tool
+            .execute(json!({"path": path, "content": content}))
+            .unwrap();
+        assert!(result.contains("Successfully wrote"));
+
+        // Verify the file was actually written
+        let read_back = fs::read_to_string(path).unwrap();
+        assert_eq!(read_back, content);
+
+        // Cleanup
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_write_overwrites_existing() {
+        let tool = WriteFileTool;
+        let path = "/tmp/hermitclaw_test_overwrite.txt";
+
+        tool.execute(json!({"path": path, "content": "first"}))
+            .unwrap();
+        tool.execute(json!({"path": path, "content": "second"}))
+            .unwrap();
+
+        let read_back = fs::read_to_string(path).unwrap();
+        assert_eq!(read_back, "second");
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_write_blocked_sensitive_path() {
+        let tool = WriteFileTool;
+        let result = tool.execute(json!({"path": "/etc/shadow", "content": "bad"}));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn test_write_missing_path_arg() {
+        let tool = WriteFileTool;
+        let result = tool.execute(json!({"content": "hello"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn test_write_missing_content_arg() {
+        let tool = WriteFileTool;
+        let result = tool.execute(json!({"path": "/tmp/test.txt"}));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn test_write_nonexistent_parent_dir() {
+        let tool = WriteFileTool;
+        let result = tool.execute(json!({
+            "path": "/tmp/hermitclaw_nonexistent_dir_xyz/file.txt",
+            "content": "hello"
+        }));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_write_empty_content() {
+        let tool = WriteFileTool;
+        let path = "/tmp/hermitclaw_test_empty.txt";
+        let result = tool.execute(json!({"path": path, "content": ""})).unwrap();
+        assert!(result.contains("Successfully wrote"));
+
+        let read_back = fs::read_to_string(path).unwrap();
+        assert_eq!(read_back, "");
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_write_permissions() {
+        let tool = WriteFileTool;
+        let perms = tool.permissions();
+        assert!(perms.filesystem_read);
+        assert!(perms.filesystem_write);
+        assert!(!perms.network);
+        assert!(!perms.subprocess);
+    }
+}

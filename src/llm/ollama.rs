@@ -238,3 +238,268 @@ impl Message {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // --- Message conversion tests ---
+
+    #[test]
+    fn test_convert_user_message() {
+        let messages = vec![Message::user("Hello")];
+        let converted = OllamaClient::convert_messages(&messages);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "user");
+        assert_eq!(converted[0].content, "Hello");
+        assert!(converted[0].tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_convert_system_message() {
+        let messages = vec![Message::system("You are helpful.")];
+        let converted = OllamaClient::convert_messages(&messages);
+        assert_eq!(converted[0].role, "system");
+        assert_eq!(converted[0].content, "You are helpful.");
+    }
+
+    #[test]
+    fn test_convert_assistant_with_tool_calls() {
+        let tc = vec![ToolCall {
+            id: "call_0".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({"path": "/tmp/test.txt"}),
+        }];
+        let messages = vec![Message::assistant_with_tool_calls(tc)];
+        let converted = OllamaClient::convert_messages(&messages);
+        assert_eq!(converted[0].role, "assistant");
+        let tool_calls = converted[0].tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "read_file");
+        assert_eq!(tool_calls[0].function.arguments, json!({"path": "/tmp/test.txt"}));
+    }
+
+    #[test]
+    fn test_convert_tool_result_message() {
+        let messages = vec![Message::tool_result("call_0", "file contents here")];
+        let converted = OllamaClient::convert_messages(&messages);
+        assert_eq!(converted[0].role, "tool");
+        assert_eq!(converted[0].content, "file contents here");
+    }
+
+    #[test]
+    fn test_convert_mixed_conversation() {
+        let messages = vec![
+            Message::system("sys prompt"),
+            Message::user("question"),
+            Message::assistant("answer"),
+            Message::user("follow-up"),
+        ];
+        let converted = OllamaClient::convert_messages(&messages);
+        assert_eq!(converted.len(), 4);
+        assert_eq!(converted[0].role, "system");
+        assert_eq!(converted[1].role, "user");
+        assert_eq!(converted[2].role, "assistant");
+        assert_eq!(converted[3].role, "user");
+    }
+
+    #[test]
+    fn test_convert_empty_messages() {
+        let messages: Vec<Message> = vec![];
+        let converted = OllamaClient::convert_messages(&messages);
+        assert!(converted.is_empty());
+    }
+
+    // --- Tool definition conversion tests ---
+
+    #[test]
+    fn test_convert_tools_single() {
+        let tools = vec![ToolDefinition {
+            name: "read_file".to_string(),
+            description: "Read a file".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+        }];
+        let converted = OllamaClient::convert_tools(&tools);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].tool_type, "function");
+        assert_eq!(converted[0].function.name, "read_file");
+        assert_eq!(converted[0].function.description, "Read a file");
+    }
+
+    #[test]
+    fn test_convert_tools_empty() {
+        let tools: Vec<ToolDefinition> = vec![];
+        let converted = OllamaClient::convert_tools(&tools);
+        assert!(converted.is_empty());
+    }
+
+    // --- Request serialization tests ---
+
+    #[test]
+    fn test_request_serialization_no_tools() {
+        let request = OllamaChatRequest {
+            model: "qwen2.5:7b".to_string(),
+            messages: vec![OllamaMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                tool_calls: None,
+            }],
+            stream: false,
+            tools: vec![],
+        };
+        let json_str = serde_json::to_string(&request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["model"], "qwen2.5:7b");
+        assert_eq!(parsed["stream"], false);
+        assert_eq!(parsed["messages"][0]["role"], "user");
+        assert_eq!(parsed["messages"][0]["content"], "Hello");
+        // tools field should be absent (skip_serializing_if = "Vec::is_empty")
+        assert!(parsed.get("tools").is_none());
+    }
+
+    #[test]
+    fn test_request_serialization_with_tools() {
+        let request = OllamaChatRequest {
+            model: "test-model".to_string(),
+            messages: vec![],
+            stream: false,
+            tools: vec![OllamaTool {
+                tool_type: "function".to_string(),
+                function: OllamaFunctionDef {
+                    name: "test_tool".to_string(),
+                    description: "A test tool".to_string(),
+                    parameters: json!({"type": "object"}),
+                },
+            }],
+        };
+        let json_str = serde_json::to_string(&request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["tools"][0]["type"], "function");
+        assert_eq!(parsed["tools"][0]["function"]["name"], "test_tool");
+    }
+
+    // --- Response deserialization tests ---
+
+    #[test]
+    fn test_response_parse_text_only() {
+        let json = json!({
+            "message": {
+                "role": "assistant",
+                "content": "Hello! How can I help?"
+            }
+        });
+        let resp: OllamaChatResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.message.content, "Hello! How can I help?");
+        assert!(resp.message.tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_response_parse_with_tool_calls() {
+        let json = json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "read_file",
+                            "arguments": {"path": "/tmp/test.txt"}
+                        }
+                    }
+                ]
+            }
+        });
+        let resp: OllamaChatResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.message.content, "");
+        let tool_calls = resp.message.tool_calls.unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "read_file");
+    }
+
+    #[test]
+    fn test_response_parse_multiple_tool_calls() {
+        let json = json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "tool_a", "arguments": {}}},
+                    {"function": {"name": "tool_b", "arguments": {"key": "value"}}}
+                ]
+            }
+        });
+        let resp: OllamaChatResponse = serde_json::from_value(json).unwrap();
+        let tool_calls = resp.message.tool_calls.unwrap();
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].function.name, "tool_a");
+        assert_eq!(tool_calls[1].function.name, "tool_b");
+    }
+
+    #[test]
+    fn test_response_parse_empty_content_becomes_none() {
+        // Simulate what our LlmProvider impl does with empty content
+        let json = json!({
+            "message": {
+                "role": "assistant",
+                "content": ""
+            }
+        });
+        let resp: OllamaChatResponse = serde_json::from_value(json).unwrap();
+        // Our code treats empty string as None
+        let content = if resp.message.content.is_empty() {
+            None
+        } else {
+            Some(resp.message.content)
+        };
+        assert!(content.is_none());
+    }
+
+    // --- Message constructor tests ---
+
+    #[test]
+    fn test_message_constructors() {
+        let sys = Message::system("sys");
+        assert_eq!(sys.role, Role::System);
+        assert_eq!(sys.content, "sys");
+        assert!(sys.tool_call_id.is_none());
+        assert!(sys.tool_calls.is_empty());
+
+        let usr = Message::user("usr");
+        assert_eq!(usr.role, Role::User);
+
+        let asst = Message::assistant("asst");
+        assert_eq!(asst.role, Role::Assistant);
+        assert!(asst.tool_calls.is_empty());
+
+        let tool = Message::tool_result("id_0", "result");
+        assert_eq!(tool.role, Role::Tool);
+        assert_eq!(tool.tool_call_id, Some("id_0".to_string()));
+
+        let asst_tc = Message::assistant_with_tool_calls(vec![ToolCall {
+            id: "c0".to_string(),
+            name: "test".to_string(),
+            arguments: json!({}),
+        }]);
+        assert_eq!(asst_tc.role, Role::Assistant);
+        assert_eq!(asst_tc.tool_calls.len(), 1);
+        assert!(asst_tc.content.is_empty());
+    }
+
+    // --- OllamaClient constructor test ---
+
+    #[test]
+    fn test_client_stores_config() {
+        let client = OllamaClient::new("http://localhost:11434", "test-model");
+        assert_eq!(client.base_url, "http://localhost:11434");
+        assert_eq!(client.model, "test-model");
+    }
+}

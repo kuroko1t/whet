@@ -73,3 +73,90 @@ impl Tool for ShellTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shell_echo() {
+        let tool = ShellTool;
+        let result = tool.execute(json!({"command": "echo hello"})).unwrap();
+        assert_eq!(result.trim(), "hello");
+    }
+
+    #[test]
+    fn test_shell_stderr_output() {
+        let tool = ShellTool;
+        let result = tool
+            .execute(json!({"command": "echo error_msg >&2"}))
+            .unwrap();
+        assert!(result.contains("[stderr]"));
+        assert!(result.contains("error_msg"));
+    }
+
+    #[test]
+    fn test_shell_mixed_stdout_stderr() {
+        let tool = ShellTool;
+        let result = tool
+            .execute(json!({"command": "echo out && echo err >&2"}))
+            .unwrap();
+        assert!(result.contains("out"));
+        assert!(result.contains("[stderr]"));
+        assert!(result.contains("err"));
+    }
+
+    #[test]
+    fn test_shell_working_dir() {
+        let tool = ShellTool;
+        let result = tool
+            .execute(json!({"command": "pwd", "working_dir": "/tmp"}))
+            .unwrap();
+        assert!(result.trim().starts_with("/tmp"));
+    }
+
+    #[test]
+    fn test_shell_invalid_working_dir() {
+        let tool = ShellTool;
+        let result = tool.execute(json!({"command": "echo hi", "working_dir": "/nonexistent_dir_12345"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_shell_missing_command_arg() {
+        let tool = ShellTool;
+        let result = tool.execute(json!({}));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn test_shell_failing_command() {
+        let tool = ShellTool;
+        // `false` command returns exit code 1, but we capture output anyway
+        let result = tool.execute(json!({"command": "false"}));
+        // Should succeed (we return stdout/stderr, not propagate exit code)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_shell_multiline_output() {
+        let tool = ShellTool;
+        let result = tool
+            .execute(json!({"command": "echo line1 && echo line2 && echo line3"}))
+            .unwrap();
+        let lines: Vec<&str> = result.trim().lines().collect();
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn test_shell_permissions() {
+        let tool = ShellTool;
+        let perms = tool.permissions();
+        assert!(perms.subprocess);
+        assert!(!perms.filesystem_read);
+        assert!(!perms.filesystem_write);
+        assert!(!perms.network);
+    }
+}

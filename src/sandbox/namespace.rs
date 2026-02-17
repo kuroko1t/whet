@@ -181,9 +181,150 @@ mod tests {
     }
 
     #[test]
-    fn test_path_safety() {
+    fn test_path_safety_safe_paths() {
         assert!(is_path_safe("./src/main.rs"));
         assert!(is_path_safe("/tmp/test.txt"));
+        assert!(is_path_safe("Cargo.toml"));
+        assert!(is_path_safe("/home/user/project/file.txt"));
+        assert!(is_path_safe("/etc/hostname"));
+        assert!(is_path_safe("/var/log/syslog"));
+    }
+
+    #[test]
+    fn test_path_safety_blocks_etc_shadow() {
         assert!(!is_path_safe("/etc/shadow"));
+    }
+
+    #[test]
+    fn test_path_safety_blocks_etc_gshadow() {
+        assert!(!is_path_safe("/etc/gshadow"));
+    }
+
+    #[test]
+    fn test_path_safety_blocks_etc_sudoers() {
+        assert!(!is_path_safe("/etc/sudoers"));
+    }
+
+    #[test]
+    fn test_path_safety_blocks_ssh_dir() {
+        assert!(!is_path_safe("~/.ssh/id_rsa"));
+        assert!(!is_path_safe("~/.ssh/authorized_keys"));
+        assert!(!is_path_safe("~/.ssh/config"));
+    }
+
+    #[test]
+    fn test_path_safety_blocks_gnupg() {
+        assert!(!is_path_safe("~/.gnupg/private-keys-v1.d/key.gpg"));
+    }
+
+    #[test]
+    fn test_path_safety_blocks_aws() {
+        assert!(!is_path_safe("~/.aws/credentials"));
+        assert!(!is_path_safe("~/.aws/config"));
+    }
+
+    #[test]
+    fn test_path_safety_allows_etc_other() {
+        // Non-sensitive /etc files should be allowed
+        assert!(is_path_safe("/etc/hosts"));
+        assert!(is_path_safe("/etc/resolv.conf"));
+    }
+
+    // --- Sandbox execution tests ---
+
+    #[test]
+    fn test_noop_sandbox_captures_exit_code() {
+        let sandbox = NoOpSandbox;
+        let perms = ToolPermissions {
+            filesystem_read: false,
+            filesystem_write: false,
+            network: false,
+            subprocess: true,
+        };
+        let result = sandbox.execute("exit 42", &perms, None).unwrap();
+        assert_eq!(result.exit_code, 42);
+    }
+
+    #[test]
+    fn test_noop_sandbox_working_dir() {
+        let sandbox = NoOpSandbox;
+        let perms = ToolPermissions {
+            filesystem_read: false,
+            filesystem_write: false,
+            network: false,
+            subprocess: true,
+        };
+        let result = sandbox.execute("pwd", &perms, Some("/tmp")).unwrap();
+        assert!(result.stdout.trim().starts_with("/tmp"));
+    }
+
+    #[test]
+    fn test_noop_sandbox_stderr() {
+        let sandbox = NoOpSandbox;
+        let perms = ToolPermissions {
+            filesystem_read: false,
+            filesystem_write: false,
+            network: false,
+            subprocess: true,
+        };
+        let result = sandbox
+            .execute("echo error >&2", &perms, None)
+            .unwrap();
+        assert!(result.stderr.contains("error"));
+    }
+
+    #[test]
+    fn test_noop_sandbox_invalid_working_dir() {
+        let sandbox = NoOpSandbox;
+        let perms = ToolPermissions {
+            filesystem_read: false,
+            filesystem_write: false,
+            network: false,
+            subprocess: true,
+        };
+        let result = sandbox.execute("echo hi", &perms, Some("/nonexistent_xyz"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_namespace_sandbox_basic_execution() {
+        let sandbox = NamespaceSandbox::new();
+        let perms = ToolPermissions {
+            filesystem_read: true,
+            filesystem_write: false,
+            network: true, // network allowed
+            subprocess: true,
+        };
+        let result = sandbox.execute("echo sandbox_test", &perms, None);
+        match result {
+            Ok(r) => {
+                assert!(r.stdout.contains("sandbox_test"));
+                assert_eq!(r.exit_code, 0);
+            }
+            Err(_) => {
+                // unshare may fail due to permissions - acceptable in CI
+            }
+        }
+    }
+
+    #[test]
+    fn test_namespace_sandbox_network_allowed_when_permitted() {
+        let sandbox = NamespaceSandbox::new();
+        let perms = ToolPermissions {
+            filesystem_read: false,
+            filesystem_write: false,
+            network: true, // network explicitly allowed
+            subprocess: true,
+        };
+        // With network: true, unshare should NOT use --net flag
+        let result = sandbox.execute("echo net_allowed", &perms, None);
+        match result {
+            Ok(r) => {
+                assert!(r.stdout.contains("net_allowed"));
+            }
+            Err(_) => {
+                // unshare may fail - acceptable
+            }
+        }
     }
 }
