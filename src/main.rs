@@ -394,9 +394,18 @@ fn handle_slash_command(
                 "  {}           - Toggle plan mode (read-only analysis)",
                 "/plan".cyan()
             );
+            println!(
+                "  {} [cmd]   - Run test-fix loop (default: cargo test)",
+                "/test".cyan()
+            );
             println!("  {}          - Clear conversation history", "/clear".cyan());
             println!("  {}           - Show this help", "/help".cyan());
             println!("  {}           - Exit", "Ctrl+D".dimmed());
+            SlashResult::Handled
+        }
+        "/test" => {
+            let test_cmd = if arg.is_empty() { "cargo test" } else { arg };
+            run_test_fix_loop(agent, test_cmd, cfg);
             SlashResult::Handled
         }
         "/clear" => {
@@ -409,6 +418,96 @@ fn handle_slash_command(
         }
         _ => SlashResult::NotACommand,
     }
+}
+
+fn run_test_fix_loop(agent: &mut Agent, test_cmd: &str, cfg: &Config) {
+    let max_fix_iterations = 5;
+
+    for iteration in 1..=max_fix_iterations {
+        println!(
+            "\n{} Running tests (iteration {}/{}): {}",
+            ">>".cyan(),
+            iteration,
+            max_fix_iterations,
+            test_cmd.bright_white()
+        );
+
+        // Run the test command
+        let output = std::process::Command::new("sh")
+            .args(["-c", test_cmd])
+            .output();
+
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("{} Failed to run test command: {}", "Error:".red(), e);
+                return;
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}{}", stdout, stderr);
+
+        if output.status.success() {
+            println!("{} All tests passed!", ">>".green().bold());
+            return;
+        }
+
+        // Tests failed — show summary and ask agent to fix
+        println!(
+            "{} Tests failed (exit code: {})",
+            ">>".red(),
+            output.status.code().unwrap_or(-1)
+        );
+
+        // Truncate output if too long
+        let max_output = 4000;
+        let failure_output = if combined.len() > max_output {
+            format!("...(truncated)\n{}", &combined[combined.len() - max_output..])
+        } else {
+            combined.to_string()
+        };
+
+        let fix_prompt = format!(
+            "The test command `{}` failed with the following output:\n\n```\n{}\n```\n\nPlease analyze the test failures and fix the code. Use the available tools to read the relevant files, understand the errors, and make the necessary changes.",
+            test_cmd, failure_output
+        );
+
+        println!("{} Asking agent to fix...\n", ">>".cyan());
+
+        let streaming = cfg.llm.streaming;
+        let response = if streaming {
+            eprint!("{} ", "bot>".green().bold());
+            let response = agent.process_message_with_callbacks(
+                &fix_prompt,
+                &mut |token| {
+                    eprint!("{}", token);
+                },
+                &mut |tool_name, args| ask_approval(tool_name, args),
+            );
+            eprintln!();
+            response
+        } else {
+            eprint!("{}", "[thinking...]".dimmed());
+            let response = agent.process_message_with_callbacks(
+                &fix_prompt,
+                &mut |_| {},
+                &mut |tool_name, args| ask_approval(tool_name, args),
+            );
+            eprint!("\r{}\r", " ".repeat(20));
+            println!("{} {}", "bot>".green().bold(), response);
+            response
+        };
+
+        let _ = response; // Agent's fix is already applied via tools
+    }
+
+    eprintln!(
+        "{} Max fix iterations ({}) reached. Tests still failing.",
+        "Warning:".yellow(),
+        max_fix_iterations
+    );
 }
 
 fn main() {
