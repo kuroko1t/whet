@@ -1,0 +1,14 @@
+# hermitclaw configuration
+# Copy to ~/.hermitclaw/config.toml
+
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 10
+sandbox = true
+
+[memory]
+database_path = "~/.hermitclaw/memory.db"
