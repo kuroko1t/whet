@@ -4,15 +4,27 @@ use colored::Colorize;
 mod agent;
 mod config;
 mod llm;
+mod mcp;
 mod memory;
-mod sandbox;
+mod security;
 mod tools;
 
 use agent::{Agent, AgentConfig};
 use config::Config;
-use llm::ollama::OllamaClient;
+use llm::LlmProvider;
 use memory::store::MemoryStore;
 use tools::default_registry;
+
+fn create_provider(cfg: &Config, model: &str) -> Box<dyn LlmProvider> {
+    match cfg.llm.provider.as_str() {
+        "openai_compat" => Box::new(llm::openai_compat::OpenAiCompatClient::new(
+            &cfg.llm.base_url,
+            model,
+            cfg.llm.api_key.clone(),
+        )),
+        _ => Box::new(llm::ollama::OllamaClient::new(&cfg.llm.base_url, model)),
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "hermitclaw")]
@@ -29,9 +41,6 @@ enum Commands {
         /// Ollama model to use
         #[arg(short, long)]
         model: Option<String>,
-        /// Disable sandbox for tool execution
-        #[arg(long)]
-        no_sandbox: bool,
         /// Continue the last conversation
         #[arg(long, short = 'c')]
         r#continue: bool,
@@ -45,34 +54,29 @@ enum Commands {
     Config,
 }
 
-fn run_chat(model: Option<String>, no_sandbox: bool, continue_conv: bool) {
+fn run_chat(model: Option<String>, continue_conv: bool) {
     let cfg = Config::load();
 
     let model = model.unwrap_or(cfg.llm.model.clone());
-    let sandbox_enabled = if no_sandbox { false } else { cfg.agent.sandbox };
 
     println!("{}", "hermitclaw v0.1.0".bold());
     println!("The hermit needs no network.\n");
     println!("Model: {}", model.green());
-    println!(
-        "Sandbox: {}",
-        if sandbox_enabled {
-            "enabled".green().to_string()
-        } else {
-            "disabled".red().to_string()
-        }
-    );
     println!("Type {} to exit.\n", "Ctrl+D".dimmed());
 
-    let client = OllamaClient::new(&cfg.llm.base_url, &model);
-    let registry = default_registry();
+    let provider = create_provider(&cfg, &model);
+    let mut registry = default_registry();
+
+    // Register MCP tools
+    if !cfg.mcp.servers.is_empty() {
+        mcp::register_mcp_tools(&mut registry, &cfg.mcp.servers);
+    }
     let agent_config = AgentConfig {
         model: model.clone(),
         max_iterations: cfg.agent.max_iterations,
-        sandbox_enabled,
     };
 
-    let mut agent = Agent::new(Box::new(client), registry, agent_config);
+    let mut agent = Agent::new(provider, registry, agent_config);
 
     // Memory store
     let store = match MemoryStore::new(&cfg.memory.database_path) {
@@ -145,13 +149,23 @@ fn run_chat(model: Option<String>, no_sandbox: bool, continue_conv: bool) {
                     let _ = store.save_message(&conversation_id, "user", input, None);
                 }
 
-                eprint!("{}", "[thinking...]".dimmed());
                 let start = std::time::Instant::now();
-                let response = agent.process_message(input);
+                let streaming = cfg.llm.streaming;
+                let response = if streaming {
+                    eprint!("{} ", "bot>".green().bold());
+                    let response = agent.process_message_with_callback(input, &mut |token| {
+                        eprint!("{}", token);
+                    });
+                    eprintln!();
+                    response
+                } else {
+                    eprint!("{}", "[thinking...]".dimmed());
+                    let response = agent.process_message(input);
+                    eprint!("\r{}\r", " ".repeat(20));
+                    println!("{} {}", "bot>".green().bold(), response);
+                    response
+                };
                 let elapsed = start.elapsed();
-                eprint!("\r{}\r", " ".repeat(20));
-
-                println!("{} {}", "bot>".green().bold(), response);
                 println!("{}", format!("({:.1}s)", elapsed.as_secs_f64()).dimmed());
                 println!();
 
@@ -182,14 +196,17 @@ fn main() {
     match cli.command {
         Commands::Chat {
             model,
-            no_sandbox,
             r#continue,
             new: _,
         } => {
-            run_chat(model, no_sandbox, r#continue);
+            run_chat(model, r#continue);
         }
         Commands::Tools => {
-            let registry = default_registry();
+            let cfg = Config::load();
+            let mut registry = default_registry();
+            if !cfg.mcp.servers.is_empty() {
+                mcp::register_mcp_tools(&mut registry, &cfg.mcp.servers);
+            }
             println!("{}", "Available tools:".bold());
             println!();
             for tool in registry.list() {

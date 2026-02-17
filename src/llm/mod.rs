@@ -1,4 +1,5 @@
 pub mod ollama;
+pub mod openai_compat;
 
 use std::fmt;
 
@@ -72,4 +73,15 @@ impl std::error::Error for LlmError {}
 
 pub trait LlmProvider {
     fn chat(&self, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse, LlmError>;
+
+    /// Streaming variant that calls on_token for each token as it arrives.
+    /// Default implementation falls back to non-streaming chat.
+    fn chat_streaming(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        _on_token: &mut dyn FnMut(&str),
+    ) -> Result<LlmResponse, LlmError> {
+        self.chat(messages, tools)
+    }
 }

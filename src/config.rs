@@ -5,6 +5,8 @@ pub struct Config {
     pub llm: LlmConfig,
     pub agent: AgentConfig,
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -12,17 +14,34 @@ pub struct LlmConfig {
     pub provider: String,
     pub model: String,
     pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub streaming: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentConfig {
     pub max_iterations: usize,
-    pub sandbox: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MemoryConfig {
     pub database_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 impl Default for Config {
@@ -32,14 +51,16 @@ impl Default for Config {
                 provider: "ollama".to_string(),
                 model: "qwen2.5:7b".to_string(),
                 base_url: "http://localhost:11434".to_string(),
+                api_key: None,
+                streaming: false,
             },
             agent: AgentConfig {
                 max_iterations: 10,
-                sandbox: true,
             },
             memory: MemoryConfig {
                 database_path: "~/.hermitclaw/memory.db".to_string(),
             },
+            mcp: McpConfig::default(),
         }
     }
 }
@@ -102,7 +123,6 @@ mod tests {
         assert_eq!(config.llm.model, "qwen2.5:7b");
         assert_eq!(config.llm.base_url, "http://localhost:11434");
         assert_eq!(config.agent.max_iterations, 10);
-        assert!(config.agent.sandbox);
         assert_eq!(config.memory.database_path, "~/.hermitclaw/memory.db");
     }
 
@@ -116,7 +136,6 @@ mod tests {
         assert_eq!(parsed.llm.model, config.llm.model);
         assert_eq!(parsed.llm.base_url, config.llm.base_url);
         assert_eq!(parsed.agent.max_iterations, config.agent.max_iterations);
-        assert_eq!(parsed.agent.sandbox, config.agent.sandbox);
         assert_eq!(parsed.memory.database_path, config.memory.database_path);
     }
 
@@ -130,7 +149,6 @@ base_url = "http://192.168.1.100:11434"
 
 [agent]
 max_iterations = 5
-sandbox = false
 
 [memory]
 database_path = "/custom/path/memory.db"
@@ -139,7 +157,6 @@ database_path = "/custom/path/memory.db"
         assert_eq!(config.llm.model, "llama3.2:3b");
         assert_eq!(config.llm.base_url, "http://192.168.1.100:11434");
         assert_eq!(config.agent.max_iterations, 5);
-        assert!(!config.agent.sandbox);
         assert_eq!(config.memory.database_path, "/custom/path/memory.db");
     }
 
@@ -160,7 +177,6 @@ base_url = "http://localhost:11434"
 
 [agent]
 max_iterations = 10
-sandbox = true
 "#;
         let result = Config::from_toml(toml_str);
         assert!(result.is_err());
@@ -177,7 +193,6 @@ base_url = "http://localhost:11434"
 
 [agent]
 max_iterations = "not a number"
-sandbox = true
 
 [memory]
 database_path = "test.db"
@@ -191,5 +206,230 @@ database_path = "test.db"
         // load() should return defaults when config file doesn't exist
         let config = Config::load();
         assert_eq!(config.llm.model, "qwen2.5:7b");
+    }
+
+    // --- Backward compatibility tests ---
+
+    #[test]
+    fn test_config_backward_compat_without_api_key() {
+        // Old configs without api_key should parse with None default
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 10
+
+[memory]
+database_path = "~/.hermitclaw/memory.db"
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert!(config.llm.api_key.is_none());
+    }
+
+    #[test]
+    fn test_config_backward_compat_without_streaming() {
+        // Old configs without streaming should default to false
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 10
+
+[memory]
+database_path = "~/.hermitclaw/memory.db"
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert!(!config.llm.streaming);
+    }
+
+    #[test]
+    fn test_config_backward_compat_without_mcp() {
+        // Old configs without mcp section should have empty servers
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 10
+
+[memory]
+database_path = "~/.hermitclaw/memory.db"
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert!(config.mcp.servers.is_empty());
+    }
+
+    #[test]
+    fn test_config_with_api_key() {
+        let toml_str = r#"
+[llm]
+provider = "openai_compat"
+model = "gpt-3.5-turbo"
+base_url = "http://localhost:8080"
+api_key = "sk-test-key-123"
+
+[agent]
+max_iterations = 10
+
+[memory]
+database_path = "test.db"
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.llm.api_key, Some("sk-test-key-123".to_string()));
+        assert_eq!(config.llm.provider, "openai_compat");
+    }
+
+    #[test]
+    fn test_config_with_streaming_enabled() {
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+streaming = true
+
+[agent]
+max_iterations = 10
+
+[memory]
+database_path = "test.db"
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert!(config.llm.streaming);
+    }
+
+    #[test]
+    fn test_config_with_mcp_servers() {
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 10
+
+[memory]
+database_path = "test.db"
+
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[mcp.servers]]
+name = "sqlite"
+command = "mcp-server-sqlite"
+args = ["--db", "test.db"]
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.mcp.servers.len(), 2);
+        assert_eq!(config.mcp.servers[0].name, "filesystem");
+        assert_eq!(config.mcp.servers[0].command, "npx");
+        assert_eq!(config.mcp.servers[0].args.len(), 3);
+        assert_eq!(config.mcp.servers[1].name, "sqlite");
+    }
+
+    #[test]
+    fn test_config_mcp_server_without_args() {
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 10
+
+[memory]
+database_path = "test.db"
+
+[[mcp.servers]]
+name = "simple"
+command = "mcp-server"
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].name, "simple");
+        assert!(config.mcp.servers[0].args.is_empty());
+    }
+
+    #[test]
+    fn test_config_default_new_fields() {
+        let config = Config::default();
+        assert!(config.llm.api_key.is_none());
+        assert!(!config.llm.streaming);
+        assert!(config.mcp.servers.is_empty());
+    }
+
+    #[test]
+    fn test_config_roundtrip_with_new_fields() {
+        let mut config = Config::default();
+        config.llm.api_key = Some("sk-test".to_string());
+        config.llm.streaming = true;
+
+        let toml_str = config.to_toml().unwrap();
+        let parsed = Config::from_toml(&toml_str).unwrap();
+
+        assert_eq!(parsed.llm.api_key, Some("sk-test".to_string()));
+        assert!(parsed.llm.streaming);
+    }
+
+    #[test]
+    fn test_config_with_all_new_fields() {
+        let toml_str = r#"
+[llm]
+provider = "openai_compat"
+model = "llama3"
+base_url = "http://localhost:8080"
+api_key = "sk-key"
+streaming = true
+
+[agent]
+max_iterations = 20
+
+[memory]
+database_path = "/data/memory.db"
+
+[[mcp.servers]]
+name = "tools"
+command = "mcp-tools"
+args = ["--verbose"]
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.llm.provider, "openai_compat");
+        assert_eq!(config.llm.api_key, Some("sk-key".to_string()));
+        assert!(config.llm.streaming);
+        assert_eq!(config.agent.max_iterations, 20);
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].name, "tools");
+    }
+
+    #[test]
+    fn test_config_extra_unknown_fields_ignored() {
+        // TOML parser should ignore unknown fields gracefully
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 10
+
+[memory]
+database_path = "test.db"
+"#;
+        // This should parse fine even without all new optional fields
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.llm.provider, "ollama");
     }
 }

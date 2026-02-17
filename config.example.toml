@@ -2,13 +2,28 @@
 # Copy to ~/.hermitclaw/config.toml
 
 [llm]
-provider = "ollama"
+provider = "ollama"          # "ollama" or "openai_compat"
 model = "qwen2.5:7b"
 base_url = "http://localhost:11434"
+# api_key = "sk-..."         # Optional: required for some OpenAI-compatible servers
+# streaming = true           # Enable streaming responses (default: false)
+
+# OpenAI-compatible server examples:
+# [llm]
+# provider = "openai_compat"
+# model = "gpt-3.5-turbo"
+# base_url = "http://localhost:8080"   # llama.cpp server
+# api_key = "sk-..."                   # Optional
+# streaming = true
 
 [agent]
 max_iterations = 10
-sandbox = true
 
 [memory]
 database_path = "~/.hermitclaw/memory.db"
+
+# MCP (Model Context Protocol) servers
+# [[mcp.servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
