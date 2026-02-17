@@ -1,5 +1,6 @@
 pub mod prompt;
 
+use crate::config::{PermissionMode, ToolRiskLevel};
 use crate::llm::{LlmProvider, Message};
 use crate::tools::ToolRegistry;
 use colored::Colorize;
@@ -14,6 +15,7 @@ pub struct Agent {
 pub struct AgentConfig {
     pub model: String,
     pub max_iterations: usize,
+    pub permission_mode: PermissionMode,
 }
 
 impl Default for AgentConfig {
@@ -21,6 +23,7 @@ impl Default for AgentConfig {
         Self {
             model: "qwen2.5:7b".to_string(),
             max_iterations: 10,
+            permission_mode: PermissionMode::Default,
         }
     }
 }
@@ -42,13 +45,25 @@ impl Agent {
     }
 
     pub fn process_message(&mut self, user_input: &str) -> String {
-        self.process_message_with_callback(user_input, &mut |_| {})
+        self.process_message_with_callbacks(user_input, &mut |_| {}, &mut |_, _| true)
     }
 
     pub fn process_message_with_callback(
         &mut self,
         user_input: &str,
         on_token: &mut dyn FnMut(&str),
+    ) -> String {
+        self.process_message_with_callbacks(user_input, on_token, &mut |_, _| true)
+    }
+
+    /// Process a message with streaming callback and approval callback.
+    /// `on_approve` is called before executing a tool that requires approval.
+    /// It receives (tool_name, &arguments) and returns true to allow, false to deny.
+    pub fn process_message_with_callbacks(
+        &mut self,
+        user_input: &str,
+        on_token: &mut dyn FnMut(&str),
+        on_approve: &mut dyn FnMut(&str, &serde_json::Value) -> bool,
     ) -> String {
         self.memory.push(Message::user(user_input));
 
@@ -79,9 +94,21 @@ impl Agent {
                 );
 
                 let result = if let Some(tool) = self.tools.get(&tool_call.name) {
-                    match tool.execute(tool_call.arguments.clone()) {
-                        Ok(output) => output,
-                        Err(e) => format!("Tool error: {}", e),
+                    // Check if approval is needed
+                    if self.needs_approval(tool.risk_level()) {
+                        if !on_approve(&tool_call.name, &tool_call.arguments) {
+                            "Tool execution denied by user.".to_string()
+                        } else {
+                            match tool.execute(tool_call.arguments.clone()) {
+                                Ok(output) => output,
+                                Err(e) => format!("Tool error: {}", e),
+                            }
+                        }
+                    } else {
+                        match tool.execute(tool_call.arguments.clone()) {
+                            Ok(output) => output,
+                            Err(e) => format!("Tool error: {}", e),
+                        }
                     }
                 } else {
                     format!("Unknown tool: {}", tool_call.name)
@@ -100,6 +127,17 @@ impl Agent {
         }
 
         "Max iterations reached. The agent could not complete the task.".to_string()
+    }
+
+    /// Determine if a tool at the given risk level needs user approval.
+    fn needs_approval(&self, risk_level: ToolRiskLevel) -> bool {
+        match self.config.permission_mode {
+            PermissionMode::Yolo => false,
+            PermissionMode::AcceptEdits => risk_level == ToolRiskLevel::Dangerous,
+            PermissionMode::Default => {
+                risk_level == ToolRiskLevel::Moderate || risk_level == ToolRiskLevel::Dangerous
+            }
+        }
     }
 }
 
@@ -599,5 +637,224 @@ mod tests {
         let r2 = agent2.process_message_with_callback("test", &mut |_| {});
 
         assert_eq!(r1, r2);
+    }
+
+    // --- Permission system tests ---
+
+    fn make_agent_with_mode(llm: Box<dyn LlmProvider>, mode: PermissionMode) -> Agent {
+        Agent::new(
+            llm,
+            default_registry(),
+            AgentConfig {
+                permission_mode: mode,
+                ..AgentConfig::default()
+            },
+        )
+    }
+
+    #[test]
+    fn test_needs_approval_default_mode() {
+        let llm = MockLlm::new(vec![]);
+        let agent = make_agent_with_mode(Box::new(llm), PermissionMode::Default);
+        assert!(agent.needs_approval(ToolRiskLevel::Moderate));
+        assert!(agent.needs_approval(ToolRiskLevel::Dangerous));
+        assert!(!agent.needs_approval(ToolRiskLevel::Safe));
+    }
+
+    #[test]
+    fn test_needs_approval_accept_edits_mode() {
+        let llm = MockLlm::new(vec![]);
+        let agent = make_agent_with_mode(Box::new(llm), PermissionMode::AcceptEdits);
+        assert!(!agent.needs_approval(ToolRiskLevel::Moderate));
+        assert!(agent.needs_approval(ToolRiskLevel::Dangerous));
+        assert!(!agent.needs_approval(ToolRiskLevel::Safe));
+    }
+
+    #[test]
+    fn test_needs_approval_yolo_mode() {
+        let llm = MockLlm::new(vec![]);
+        let agent = make_agent_with_mode(Box::new(llm), PermissionMode::Yolo);
+        assert!(!agent.needs_approval(ToolRiskLevel::Moderate));
+        assert!(!agent.needs_approval(ToolRiskLevel::Dangerous));
+        assert!(!agent.needs_approval(ToolRiskLevel::Safe));
+    }
+
+    #[test]
+    fn test_tool_denied_by_approval_callback() {
+        // shell tool is Dangerous → needs approval in Default mode
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "shell".to_string(),
+                    arguments: serde_json::json!({"command": "echo hello"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("I couldn't execute the command.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Default);
+
+        let response = agent.process_message_with_callbacks(
+            "Run echo",
+            &mut |_| {},
+            &mut |_, _| false, // Always deny
+        );
+
+        assert_eq!(response, "I couldn't execute the command.");
+        // Check that the tool result contains the denial message
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(tool_result.content.contains("denied by user"));
+    }
+
+    #[test]
+    fn test_tool_approved_by_callback() {
+        // shell tool is approved → executes normally
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "shell".to_string(),
+                    arguments: serde_json::json!({"command": "echo approved"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Command executed.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Default);
+
+        let response = agent.process_message_with_callbacks(
+            "Run echo",
+            &mut |_| {},
+            &mut |_, _| true, // Always approve
+        );
+
+        assert_eq!(response, "Command executed.");
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(tool_result.content.contains("approved"));
+    }
+
+    #[test]
+    fn test_yolo_mode_skips_approval() {
+        // In yolo mode, shell tool should execute without approval callback being called
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "shell".to_string(),
+                    arguments: serde_json::json!({"command": "echo yolo"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Yolo);
+
+        let mut approval_called = false;
+        let response = agent.process_message_with_callbacks(
+            "Run echo",
+            &mut |_| {},
+            &mut |_, _| {
+                approval_called = true;
+                false // Would deny, but should never be called
+            },
+        );
+
+        assert_eq!(response, "Done.");
+        assert!(!approval_called, "Approval should not be called in yolo mode");
+    }
+
+    #[test]
+    fn test_safe_tool_never_needs_approval() {
+        // read_file is Safe → no approval needed even in Default mode
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "Cargo.toml"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Read the file.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Default);
+
+        let mut approval_called = false;
+        let response = agent.process_message_with_callbacks(
+            "Read Cargo.toml",
+            &mut |_| {},
+            &mut |_, _| {
+                approval_called = true;
+                false
+            },
+        );
+
+        assert_eq!(response, "Read the file.");
+        assert!(
+            !approval_called,
+            "Approval should not be called for safe tools"
+        );
+    }
+
+    #[test]
+    fn test_accept_edits_allows_write_file() {
+        // In AcceptEdits mode, write_file (Moderate) should not need approval
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": "/tmp/hermitclaw_perm_test.txt",
+                        "content": "test"
+                    }),
+                }],
+            },
+            LlmResponse {
+                content: Some("File written.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::AcceptEdits);
+
+        let mut approval_called = false;
+        let response = agent.process_message_with_callbacks(
+            "Write file",
+            &mut |_| {},
+            &mut |_, _| {
+                approval_called = true;
+                false
+            },
+        );
+
+        assert_eq!(response, "File written.");
+        assert!(
+            !approval_called,
+            "write_file should not need approval in AcceptEdits mode"
+        );
+        // Cleanup
+        std::fs::remove_file("/tmp/hermitclaw_perm_test.txt").ok();
     }
 }

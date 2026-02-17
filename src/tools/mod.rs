@@ -7,6 +7,7 @@ pub mod repo_map;
 pub mod shell;
 pub mod write_file;
 
+use crate::config::ToolRiskLevel;
 use crate::llm::ToolDefinition;
 use std::fmt;
 
@@ -34,6 +35,16 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> serde_json::Value;
     fn execute(&self, args: serde_json::Value) -> Result<String, ToolError>;
+
+    /// Risk level of this tool. Determines when user approval is required.
+    /// Default: classify by tool name.
+    fn risk_level(&self) -> ToolRiskLevel {
+        match self.name() {
+            "write_file" | "edit_file" => ToolRiskLevel::Moderate,
+            "shell" | "git" => ToolRiskLevel::Dangerous,
+            _ => ToolRiskLevel::Safe,
+        }
+    }
 }
 
 pub struct ToolRegistry {
@@ -219,5 +230,23 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), original_len, "Tool names should be unique");
+    }
+
+    #[test]
+    fn test_tool_risk_levels() {
+        use crate::config::ToolRiskLevel;
+
+        let registry = default_registry();
+        // Safe tools
+        assert_eq!(registry.get("read_file").unwrap().risk_level(), ToolRiskLevel::Safe);
+        assert_eq!(registry.get("list_dir").unwrap().risk_level(), ToolRiskLevel::Safe);
+        assert_eq!(registry.get("grep").unwrap().risk_level(), ToolRiskLevel::Safe);
+        assert_eq!(registry.get("repo_map").unwrap().risk_level(), ToolRiskLevel::Safe);
+        // Moderate tools
+        assert_eq!(registry.get("write_file").unwrap().risk_level(), ToolRiskLevel::Moderate);
+        assert_eq!(registry.get("edit_file").unwrap().risk_level(), ToolRiskLevel::Moderate);
+        // Dangerous tools
+        assert_eq!(registry.get("shell").unwrap().risk_level(), ToolRiskLevel::Dangerous);
+        assert_eq!(registry.get("git").unwrap().risk_level(), ToolRiskLevel::Dangerous);
     }
 }

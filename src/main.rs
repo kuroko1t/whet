@@ -54,6 +54,86 @@ enum Commands {
     Config,
 }
 
+fn ask_approval(tool_name: &str, args: &serde_json::Value) -> bool {
+    use std::io::{self, Write};
+    eprintln!(
+        "\n{}",
+        format!(
+            "  Tool '{}' wants to execute:",
+            tool_name
+        )
+        .yellow()
+    );
+    // Show a compact summary of the arguments
+    match tool_name {
+        "shell" => {
+            if let Some(cmd) = args["command"].as_str() {
+                eprintln!("    command: {}", cmd.bright_white());
+            }
+        }
+        "write_file" => {
+            if let Some(path) = args["path"].as_str() {
+                let content = args["content"].as_str().unwrap_or("");
+                eprintln!("    path: {}", path.bright_white());
+                eprintln!("    content: {} bytes", content.len());
+            }
+        }
+        "edit_file" => {
+            if let Some(path) = args["path"].as_str() {
+                eprintln!("    path: {}", path.bright_white());
+            }
+            if let Some(old) = args["old_text"].as_str() {
+                let preview = if old.len() > 80 {
+                    format!("{}...", &old[..80])
+                } else {
+                    old.to_string()
+                };
+                eprintln!("    old_text: {}", preview.dimmed());
+            }
+            if let Some(new) = args["new_text"].as_str() {
+                let preview = if new.len() > 80 {
+                    format!("{}...", &new[..80])
+                } else {
+                    new.to_string()
+                };
+                eprintln!("    new_text: {}", preview.green());
+            }
+        }
+        "git" => {
+            if let Some(cmd) = args["command"].as_str() {
+                let git_args = args["args"].as_str().unwrap_or("");
+                eprintln!("    git {} {}", cmd.bright_white(), git_args);
+            }
+        }
+        _ => {
+            eprintln!("    args: {}", args.to_string().dimmed());
+        }
+    }
+    eprint!(
+        "  {} ",
+        "Allow? [y/N/a(lways)]".bright_yellow()
+    );
+    io::stderr().flush().ok();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_ok() {
+        let answer = input.trim().to_lowercase();
+        match answer.as_str() {
+            "y" | "yes" => true,
+            "a" | "always" => {
+                eprintln!("  {}", "(Switching to yolo mode for this session)".dimmed());
+                true // The caller will handle mode switch via return value
+            }
+            _ => {
+                eprintln!("  {}", "Denied.".red());
+                false
+            }
+        }
+    } else {
+        false
+    }
+}
+
 fn run_chat(model: Option<String>, continue_conv: bool) {
     let cfg = Config::load();
 
@@ -62,6 +142,10 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
     println!("{}", "hermitclaw v0.1.0".bold());
     println!("The hermit needs no network.\n");
     println!("Model: {}", model.green());
+    println!(
+        "Permission: {}",
+        cfg.agent.permission_mode.to_string().cyan()
+    );
     println!("Type {} to exit.\n", "Ctrl+D".dimmed());
 
     let provider = create_provider(&cfg, &model);
@@ -74,6 +158,7 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
     let agent_config = AgentConfig {
         model: model.clone(),
         max_iterations: cfg.agent.max_iterations,
+        permission_mode: cfg.agent.permission_mode.clone(),
     };
 
     let mut agent = Agent::new(provider, registry, agent_config);
@@ -153,14 +238,22 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
                 let streaming = cfg.llm.streaming;
                 let response = if streaming {
                     eprint!("{} ", "bot>".green().bold());
-                    let response = agent.process_message_with_callback(input, &mut |token| {
-                        eprint!("{}", token);
-                    });
+                    let response = agent.process_message_with_callbacks(
+                        input,
+                        &mut |token| {
+                            eprint!("{}", token);
+                        },
+                        &mut |tool_name, args| ask_approval(tool_name, args),
+                    );
                     eprintln!();
                     response
                 } else {
                     eprint!("{}", "[thinking...]".dimmed());
-                    let response = agent.process_message(input);
+                    let response = agent.process_message_with_callbacks(
+                        input,
+                        &mut |_| {},
+                        &mut |tool_name, args| ask_approval(tool_name, args),
+                    );
                     eprint!("\r{}\r", " ".repeat(20));
                     println!("{} {}", "bot>".green().bold(), response);
                     response

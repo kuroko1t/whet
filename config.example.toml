@@ -18,6 +18,10 @@ base_url = "http://localhost:11434"
 
 [agent]
 max_iterations = 10
+# permission_mode = "default"   # "default", "accept_edits", or "yolo"
+# - default: Ask before file writes and command execution
+# - accept_edits: Auto-approve file edits, ask for shell/git
+# - yolo: No confirmation needed
 
 [memory]
 database_path = "~/.hermitclaw/memory.db"

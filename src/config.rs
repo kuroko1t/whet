@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -7,6 +8,45 @@ pub struct Config {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+}
+
+/// Permission mode controlling when user approval is required for tool execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Ask for approval on all file-modifying and command-executing tools
+    Default,
+    /// Auto-approve file edits, ask only for shell/git execution
+    AcceptEdits,
+    /// No confirmation needed for any tool
+    Yolo,
+}
+
+impl std::default::Default for PermissionMode {
+    fn default() -> Self {
+        PermissionMode::Default
+    }
+}
+
+impl fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PermissionMode::Default => write!(f, "default"),
+            PermissionMode::AcceptEdits => write!(f, "accept_edits"),
+            PermissionMode::Yolo => write!(f, "yolo"),
+        }
+    }
+}
+
+/// Risk level of a tool operation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolRiskLevel {
+    /// Read-only operations (read_file, list_dir, grep, repo_map)
+    Safe,
+    /// File modification operations (write_file, edit_file)
+    Moderate,
+    /// Command execution operations (shell, git)
+    Dangerous,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -23,6 +63,8 @@ pub struct LlmConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentConfig {
     pub max_iterations: usize,
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -56,6 +98,7 @@ impl Default for Config {
             },
             agent: AgentConfig {
                 max_iterations: 10,
+                permission_mode: PermissionMode::Default,
             },
             memory: MemoryConfig {
                 database_path: "~/.hermitclaw/memory.db".to_string(),
@@ -431,5 +474,86 @@ database_path = "test.db"
         // This should parse fine even without all new optional fields
         let config = Config::from_toml(toml_str).unwrap();
         assert_eq!(config.llm.provider, "ollama");
+    }
+
+    // --- Permission mode tests ---
+
+    #[test]
+    fn test_default_permission_mode() {
+        let config = Config::default();
+        assert_eq!(config.agent.permission_mode, PermissionMode::Default);
+    }
+
+    #[test]
+    fn test_permission_mode_display() {
+        assert_eq!(PermissionMode::Default.to_string(), "default");
+        assert_eq!(PermissionMode::AcceptEdits.to_string(), "accept_edits");
+        assert_eq!(PermissionMode::Yolo.to_string(), "yolo");
+    }
+
+    #[test]
+    fn test_permission_mode_backward_compat() {
+        // Configs without permission_mode should default to Default
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 10
+
+[memory]
+database_path = "test.db"
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.agent.permission_mode, PermissionMode::Default);
+    }
+
+    #[test]
+    fn test_permission_mode_yolo() {
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 10
+permission_mode = "yolo"
+
+[memory]
+database_path = "test.db"
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.agent.permission_mode, PermissionMode::Yolo);
+    }
+
+    #[test]
+    fn test_permission_mode_accept_edits() {
+        let toml_str = r#"
+[llm]
+provider = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 10
+permission_mode = "accept_edits"
+
+[memory]
+database_path = "test.db"
+"#;
+        let config = Config::from_toml(toml_str).unwrap();
+        assert_eq!(config.agent.permission_mode, PermissionMode::AcceptEdits);
+    }
+
+    #[test]
+    fn test_permission_mode_roundtrip() {
+        let mut config = Config::default();
+        config.agent.permission_mode = PermissionMode::Yolo;
+        let toml_str = config.to_toml().unwrap();
+        let parsed = Config::from_toml(&toml_str).unwrap();
+        assert_eq!(parsed.agent.permission_mode, PermissionMode::Yolo);
     }
 }
