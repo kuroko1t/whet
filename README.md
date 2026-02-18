@@ -10,57 +10,62 @@
 
 ---
 
-hermitclaw is an AI coding agent that can run **entirely on your machine**. Your code, your prompts, your data — nothing leaves your computer unless you choose to use a cloud provider.
+**The hermit needs no network.**
 
-Use local LLMs via [Ollama](https://ollama.com/) for **zero API costs** and **zero network dependency**, or connect to cloud providers (Anthropic Claude, Google Gemini, OpenAI-compatible) when you need more power. Either way, hermitclaw provides **built-in security guardrails**.
+hermitclaw is a terminal-based AI coding agent written in Rust. Run it fully offline with local LLMs, or connect to cloud providers when you need more power. Either way, your code stays under your control.
+
+- **Local-first** — works with [Ollama](https://ollama.com/), llama.cpp, LM Studio, or any OpenAI-compatible server
+- **Cloud-ready** — supports Anthropic Claude and Google Gemini when you need stronger models
+- **Secure by default** — permission gates, path safety, git safety, no telemetry
+- **Single binary** — no runtime dependencies, fast startup, ships as one executable
+- **Extensible** — 11 built-in tools, custom skills, MCP server integration
 
 ## Quick Start
 
-**1. Install Ollama and pull a model**
-
 ```bash
+# 1. Install Ollama and pull a model
 curl -fsSL https://ollama.com/install.sh | sh
 ollama pull qwen2.5:7b
-```
 
-**2. Install hermitclaw**
-
-```bash
+# 2. Build and install hermitclaw
+git clone https://github.com/kuroko1t/hermitclaw.git
+cd hermitclaw
 cargo install --path .
-```
 
-**3. Start coding**
-
-```bash
+# 3. Start coding
 hermitclaw chat
 ```
 
-That's it. No API keys. No sign-up. No internet.
+No API keys. No sign-up. No internet required.
 
 ## Demo
 
 ```
 $ hermitclaw chat
 
- hermitclaw v0.1.0 (qwen2.5:7b)
- Type /help for commands, Ctrl+D to exit
+hermitclaw v0.1.0
+The hermit needs no network.
 
-You> Find all TODO comments in this project and fix them
+Model: qwen2.5:7b
+Permission: default
+Type Ctrl+D to exit.
 
- hermitclaw is thinking...
+You> Find all TODO comments and fix them
 
-[tool] grep { pattern: "TODO", path: "." }
-Found 3 matches:
-  src/main.rs:42:  // TODO: add retry logic
-  src/config.rs:18:  // TODO: validate port range
-  src/lib.rs:7:  // TODO: implement Display
+  [tool: grep] {"pattern": "TODO", "path": "."}
 
-[tool] read_file { path: "src/main.rs" }
-[tool] edit_file { path: "src/main.rs", old_text: "// TODO: add retry logic", new_text: "..." }
- Allow edit to src/main.rs? [y/n] y
-...
+I found 3 TODO comments. Let me fix them one by one.
 
- Done! Fixed 3 TODO items across 3 files.
+  [tool: read_file] {"path": "src/main.rs"}
+  [tool: edit_file] {"path": "src/main.rs", ...}
+
+  Tool 'edit_file' wants to execute:
+    path: src/main.rs
+    old_text: // TODO: add retry logic
+    new_text: for attempt in 1..=3 { ... }
+  Allow? [y/N/a(lways)] y
+
+Done! Fixed all 3 TODO items.
 ```
 
 ## LLM Providers
@@ -230,16 +235,8 @@ database_path = "~/.hermitclaw/memory.db"
 
 ### Provider Examples
 
-**Ollama (local, default):**
-
-```toml
-[llm]
-provider = "ollama"
-model = "qwen2.5:7b"
-base_url = "http://localhost:11434"
-```
-
-**Anthropic Claude:**
+<details>
+<summary>Anthropic Claude</summary>
 
 ```toml
 [llm]
@@ -247,8 +244,10 @@ provider = "anthropic"
 model = "claude-sonnet-4-5-20250929"
 # api_key = "sk-ant-..."        # or set ANTHROPIC_API_KEY env var
 ```
+</details>
 
-**Google Gemini:**
+<details>
+<summary>Google Gemini</summary>
 
 ```toml
 [llm]
@@ -256,8 +255,10 @@ provider = "gemini"
 model = "gemini-2.0-flash"
 # api_key = "..."               # or set GEMINI_API_KEY env var
 ```
+</details>
 
-**OpenAI-compatible (llama.cpp, LM Studio, vLLM, etc.):**
+<details>
+<summary>OpenAI-compatible (llama.cpp, LM Studio, vLLM, etc.)</summary>
 
 ```toml
 [llm]
@@ -266,6 +267,7 @@ model = "your-model-name"
 base_url = "http://localhost:8080"
 api_key = "sk-..."              # optional, depends on server
 ```
+</details>
 
 ### MCP (Model Context Protocol)
 
@@ -290,15 +292,6 @@ hermitclaw chat -p "explain main.rs"   # single-shot mode (non-interactive)
 hermitclaw chat -p "fix the bug" -y    # single-shot + skip all permission prompts
 hermitclaw tools                       # list available tools
 hermitclaw config                      # show current configuration
-```
-
-## Building from Source
-
-```bash
-git clone https://github.com/kuroko1t/hermitclaw.git
-cd hermitclaw
-cargo build --release
-./target/release/hermitclaw chat
 ```
 
 ### Requirements
