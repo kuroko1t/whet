@@ -1,0 +1,7 @@
+#!/bin/sh
+# Pre-commit hook: block commits with formatting errors
+
+if ! cargo fmt -- --check > /dev/null 2>&1; then
+    echo "ERROR: cargo fmt check failed. Run 'cargo fmt' and retry."
+    exit 1
+fi
