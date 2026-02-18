@@ -197,7 +197,7 @@ mod tests {
         let tool = read_file::ReadFileTool;
         let result = tool.execute(json!({"path": "Cargo.toml"}));
         assert!(result.is_ok());
-        assert!(result.unwrap().contains("hermitclaw"));
+        assert!(result.unwrap().contains("whet"));
     }
 
     #[test]
@@ -363,9 +363,10 @@ mod tests {
             registry.get("shell").unwrap().risk_level(),
             ToolRiskLevel::Dangerous
         );
+        // Git uses dynamic risk level per-command; default is Moderate
         assert_eq!(
             registry.get("git").unwrap().risk_level(),
-            ToolRiskLevel::Dangerous
+            ToolRiskLevel::Moderate
         );
     }
 }

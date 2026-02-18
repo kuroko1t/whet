@@ -1,5 +1,5 @@
-use hermitclaw::llm::ollama::OllamaClient;
-use hermitclaw::llm::{LlmProvider, Message};
+use whet::llm::ollama::OllamaClient;
+use whet::llm::{LlmProvider, Message};
 
 #[test]
 #[ignore] // Requires Ollama to be running

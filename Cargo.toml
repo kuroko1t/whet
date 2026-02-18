@@ -1,10 +1,10 @@
 [package]
-name = "hermitclaw"
+name = "whet"
 version = "0.1.0"
 edition = "2021"
-description = "Fully offline, secure-by-default AI agent. The hermit needs no network."
+description = "An open-source terminal coding agent. Powered by local or cloud LLMs."
 license = "MIT"
-repository = "https://github.com/kuroko1t/hermitclaw"
+repository = "https://github.com/kuroko1t/whet"
 readme = "README.md"
 
 [dependencies]
@@ -20,6 +20,9 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 wait-timeout = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 lto = true

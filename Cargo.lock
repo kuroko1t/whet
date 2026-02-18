@@ -513,24 +513,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hermitclaw"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "colored",
- "dirs",
- "reqwest",
- "rusqlite",
- "rustyline",
- "serde",
- "serde_json",
- "toml",
- "uuid",
- "wait-timeout",
-]
-
-[[package]]
 name = "home"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1881,6 +1863,25 @@ checksum = "312e32e551d92129218ea9a2452120f4aabc03529ef03e4d0d82fb2780608598"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "whet"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "colored",
+ "dirs",
+ "reqwest",
+ "rusqlite",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "uuid",
+ "wait-timeout",
 ]
 
 [[package]]

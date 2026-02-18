@@ -1,61 +1,64 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="HermitClaw" width="800">
+  <img src="assets/banner.svg" alt="Whet" width="800">
 </p>
 
 <p align="center">
-  <a href="https://github.com/kuroko1t/hermitclaw/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/kuroko1t/hermitclaw/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="https://github.com/kuroko1t/whet/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/kuroko1t/whet/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="License: MIT"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.75+-orange?style=for-the-badge&logo=rust" alt="Rust"></a>
 </p>
 
-<p align="center"><strong>The hermit needs no network.</strong></p>
+<p align="center"><strong>An open-source terminal coding agent.</strong></p>
 
 <p align="center">
-A terminal-based AI coding agent written in Rust.<br>
-Run it fully offline with local LLMs, or connect to cloud providers when you need more power.
+Powered by local or cloud LLMs. Rust single-binary. No runtime dependencies.
 </p>
 
 ---
 
-## Highlights
+## What is Whet?
 
-- **Local-first** — works with [Ollama](https://ollama.com/), llama.cpp, LM Studio, or any OpenAI-compatible server
-- **Cloud-ready** — supports Anthropic Claude and Google Gemini when you need stronger models
-- **Secure by default** — permission gates, path safety, git safety, no telemetry
-- **Single binary** — no runtime dependencies, fast startup, ships as one executable
-- **Extensible** — 11 built-in tools, custom skills, MCP server integration
+Whet is an **open-source terminal coding agent** in the same category as Claude Code and similar tools. It lives in your terminal, understands your codebase, and writes code for you using any LLM.
+
+**What makes it different:**
+
+- **Open source** (MIT) — you own the code, the data, and the workflow
+- **Provider-agnostic** — Ollama, llama.cpp, Anthropic Claude, Google Gemini, or any OpenAI-compatible API
+- **Single binary** — `cargo install` and you're done, no Node.js, no Python, no Docker
+- **Offline-capable** — pair with a local LLM and nothing ever leaves your machine
 
 ## Quick Start
 
 ```bash
-# 1. Install Ollama and pull a model
-curl -fsSL https://ollama.com/install.sh | sh
+# 1. Install (from source)
+git clone https://github.com/kuroko1t/whet.git
+cd whet && cargo install --path .
+
+# 2. Pull a local model (or configure a cloud provider)
 ollama pull qwen2.5:7b
 
-# 2. Build and install hermitclaw
-git clone https://github.com/kuroko1t/hermitclaw.git
-cd hermitclaw
-cargo install --path .
-
 # 3. Start coding
-hermitclaw chat
+whet
 ```
 
-No API keys. No sign-up. No internet required.
+Or use with a cloud provider:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+whet chat -m claude-sonnet-4-5-20250929
+```
 
 ## Demo
 
 ```
-$ hermitclaw chat
+$ whet
 
-hermitclaw v0.1.0
-The hermit needs no network.
-
+whet v0.1.0
 Model: qwen2.5:7b
 Permission: default
 Type Ctrl+D to exit.
 
-You> Find all TODO comments and fix them
+you> Find all TODO comments and fix them
 
   [tool: grep] {"pattern": "TODO", "path": "."}
 
@@ -71,18 +74,22 @@ I found 3 TODO comments. Let me fix them one by one.
   Allow? [y/N/a(lways)] y
 
 Done! Fixed all 3 TODO items.
+(2.3s)
 ```
 
-## LLM Providers
+## Key Features
 
-| Provider | Network | API Key | Config `provider` |
-|---|---|---|---|
-| [Ollama](https://ollama.com/) | Local only | Not required | `"ollama"` |
-| OpenAI-compatible (llama.cpp, LM Studio, vLLM, LocalAI) | Local or remote | Optional | `"openai_compat"` |
-| [Anthropic Claude](https://www.anthropic.com/) | Cloud | Required (`ANTHROPIC_API_KEY`) | `"anthropic"` |
-| [Google Gemini](https://ai.google.dev/) | Cloud | Required (`GEMINI_API_KEY`) | `"gemini"` |
+### Project Instructions (`WHET.md`)
 
-## Built-in Tools
+Like `CLAUDE.md` for Claude Code — place a `WHET.md` (or `.whet.md`) in your project root to give Whet project-specific context. It is automatically loaded and injected into the system prompt.
+
+```bash
+whet   # in a project with WHET.md → instructions are loaded automatically
+```
+
+Use `/init` to generate a starter template.
+
+### 11 Built-in Tools
 
 | Tool | Category | Description |
 |---|---|---|
@@ -91,43 +98,35 @@ Done! Fixed all 3 TODO items.
 | `edit_file` | File | Replace an exact text match in a file |
 | `apply_diff` | File | Apply a unified diff patch (multi-hunk supported) |
 | `list_dir` | File | List directory contents (recursive option) |
-| `grep` | Code | Search for regex patterns recursively |
-| `repo_map` | Code | Show project structure with function/class/type definitions |
+| `grep` | Search | Search for regex patterns recursively |
+| `repo_map` | Search | Show project structure with definitions |
 | `shell` | System | Execute a shell command |
-| `git` | System | Safe git commands only (`status`, `diff`, `log`, `add`, `commit`, `branch`, `show`, `stash`) |
+| `git` | System | Git commands with safety tiers |
 | `web_fetch` | Web | Fetch and extract text from a URL |
 | `web_search` | Web | Search the web via DuckDuckGo |
 
 > Web tools are disabled by default. Enable with `web_enabled = true` in config.
 
-## Interactive Commands
+### Git Safety Tiers
 
-| Command | Description |
-|---|---|
-| `/model <name>` | Switch LLM model at runtime |
-| `/mode <mode>` | Change permission mode (`default`, `accept_edits`, `yolo`) |
-| `/plan` | Toggle plan mode — read-only analysis using safe tools only |
-| `/test [cmd]` | Auto test-fix loop: run tests, let AI fix failures, repeat (max 5 rounds) |
-| `/skills` | List loaded skill files |
-| `/clear` | Clear conversation and start fresh |
-| `/help` | Show all commands |
-| `Ctrl+D` | Exit |
+| Tier | Commands | Behavior |
+|---|---|---|
+| **Always allowed** | `status`, `diff`, `log`, `show`, `branch`, `stash` | No approval needed |
+| **Approval required** | `add`, `commit`, `checkout`, `switch`, `pull`, `fetch`, `push`, `merge`, `tag`, `cherry-pick`, `remote`, `reset` | User must approve |
+| **Always blocked** | `reset --hard`, `clean`, `push --force`, `rebase` | Blocked for safety |
 
-## Skills
+### MCP Extension
 
-Customize the system prompt with reusable prompt templates. Place `.md` files in `~/.hermitclaw/skills/`:
+Extend Whet with external tools via MCP (Model Context Protocol) servers:
 
-```bash
-mkdir -p ~/.hermitclaw/skills
-echo "Always write tests for new code." > ~/.hermitclaw/skills/testing.md
-echo "Use Japanese for comments." > ~/.hermitclaw/skills/japanese.md
+```toml
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 ```
 
-Skills are automatically loaded at startup and injected into the system prompt. Use `/skills` to see loaded skills.
-
-## Permission System
-
-hermitclaw asks before doing anything risky. Choose your comfort level:
+### Permission System
 
 | Mode | File reads | File writes | Shell / Git |
 |---|---|---|---|
@@ -135,67 +134,55 @@ hermitclaw asks before doing anything risky. Choose your comfort level:
 | `accept_edits` | Auto | Auto | **Ask** |
 | `yolo` | Auto | Auto | Auto |
 
-```bash
-# Set in chat
-/mode accept_edits
+### Context Compression
 
-# Or in config.toml
-[agent]
-permission_mode = "accept_edits"
-```
+Automatic conversation summarization prevents unbounded memory growth. Use `/compact` for manual compression.
 
-## Security
+## Commands
 
-hermitclaw is **secure by default**:
+| Command | Description |
+|---|---|
+| `/model <name>` | Switch LLM model at runtime |
+| `/mode <mode>` | Change permission mode (`default` / `accept_edits` / `yolo`) |
+| `/plan` | Toggle plan mode (read-only analysis) |
+| `/test [cmd]` | Auto test-fix loop (default: `cargo test`, max 5 rounds) |
+| `/init` | Generate `WHET.md` template in current directory |
+| `/compact [msg]` | Compress conversation context (optional custom instruction) |
+| `/skills` | List loaded skill files |
+| `/clear` | Clear conversation and start fresh |
+| `/help` | Show all commands |
+| `Ctrl+D` | Exit |
 
-- **Local inference** — with Ollama, code and prompts never leave your machine
-- **Path safety** — sensitive files are blocked (`/etc/shadow`, `~/.ssh`, `~/.aws`, `~/.gnupg`, etc.) with both logical normalization and symlink resolution
-- **Git safety** — destructive commands (`push`, `reset`, `clean`, `checkout`, `rebase`, `merge`) are blocked
-- **Permission gates** — file writes and shell commands require explicit approval (unless you opt out)
-- **Context compression** — automatic conversation summarization prevents unbounded memory growth
-- **No telemetry** — zero tracking, zero analytics, zero phone-home
+## LLM Providers
 
-## Architecture
-
-```
-hermitclaw (single binary)
-
-  Terminal (REPL) <--> Agent Loop
-                        |
-                        +-- LLM Provider
-                        |     Ollama / OpenAI / Anthropic / Gemini
-                        |
-                        +-- Tool Executor
-                        |     11 built-in + MCP + Skills
-                        |
-                        +-- Security Layer
-                        |     Path safety, Permissions, Git safety
-                        |
-                        +-- SQLite Memory
-                              Chat history, Resume
-```
+| Provider | Network | API Key | Config `provider` |
+|---|---|---|---|
+| [Ollama](https://ollama.com/) | Local | Not required | `"ollama"` |
+| OpenAI-compatible (llama.cpp, LM Studio, vLLM) | Local / Remote | Optional | `"openai_compat"` |
+| [Anthropic Claude](https://www.anthropic.com/) | Cloud | Required (`ANTHROPIC_API_KEY`) | `"anthropic"` |
+| [Google Gemini](https://ai.google.dev/) | Cloud | Required (`GEMINI_API_KEY`) | `"gemini"` |
 
 ## Configuration
 
-Config file: `~/.hermitclaw/config.toml`
+Config file: `~/.whet/config.toml`
 
 ```toml
 [llm]
-provider = "ollama"             # "ollama", "openai_compat", "anthropic", "gemini"
+provider = "ollama"
 model = "qwen2.5:7b"
 base_url = "http://localhost:11434"
-# api_key = "sk-..."            # for OpenAI-compatible / cloud providers
-# streaming = true              # token-by-token streaming (default: true)
+# api_key = "sk-..."
+# streaming = true
 
 [agent]
 max_iterations = 10
-# permission_mode = "default"   # default | accept_edits | yolo
-# web_enabled = false           # enable web_fetch / web_search
-# context_compression = true    # auto-summarize long conversations
-# skills_dir = "~/.hermitclaw/skills"
+# permission_mode = "default"
+# web_enabled = false
+# context_compression = true
+# skills_dir = "~/.whet/skills"
 
 [memory]
-database_path = "~/.hermitclaw/memory.db"
+database_path = "~/.whet/memory.db"
 ```
 
 <details>
@@ -205,7 +192,7 @@ database_path = "~/.hermitclaw/memory.db"
 [llm]
 provider = "anthropic"
 model = "claude-sonnet-4-5-20250929"
-# api_key = "sk-ant-..."        # or set ANTHROPIC_API_KEY env var
+# api_key = "sk-ant-..."   # or set ANTHROPIC_API_KEY env var
 ```
 </details>
 
@@ -216,51 +203,78 @@ model = "claude-sonnet-4-5-20250929"
 [llm]
 provider = "gemini"
 model = "gemini-2.0-flash"
-# api_key = "..."               # or set GEMINI_API_KEY env var
+# api_key = "..."           # or set GEMINI_API_KEY env var
 ```
 </details>
 
 <details>
-<summary>OpenAI-compatible (llama.cpp, LM Studio, vLLM, etc.)</summary>
+<summary>OpenAI-compatible (llama.cpp, LM Studio, vLLM)</summary>
 
 ```toml
 [llm]
 provider = "openai_compat"
 model = "your-model-name"
 base_url = "http://localhost:8080"
-api_key = "sk-..."              # optional, depends on server
+api_key = "sk-..."
 ```
 </details>
 
-### MCP (Model Context Protocol)
+## Skills
 
-Extend hermitclaw with external tools via MCP servers:
+Custom prompt templates loaded from `~/.whet/skills/`:
 
-```toml
-[[mcp.servers]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```bash
+mkdir -p ~/.whet/skills
+echo "Always write tests for new code." > ~/.whet/skills/testing.md
 ```
 
-MCP tools are auto-discovered and registered as `mcp_{server}_{tool}`.
+Skills are injected into the system prompt automatically. Use `/skills` to list them.
 
 ## CLI
 
 ```bash
-hermitclaw chat                        # start interactive chat
-hermitclaw chat -m llama3.2:3b         # use a specific model
-hermitclaw chat --continue             # resume last conversation
-hermitclaw chat -p "explain main.rs"   # single-shot mode (non-interactive)
-hermitclaw chat -p "fix the bug" -y    # single-shot + skip all permission prompts
-hermitclaw tools                       # list available tools
-hermitclaw config                      # show current configuration
+whet                             # start interactive chat (default)
+whet "fix the bug"               # single-shot mode
+whet chat -m llama3.2:3b         # use a specific model
+whet chat --continue             # resume last conversation
+whet chat -p "explain main.rs"   # single-shot via subcommand
+whet chat -y                     # skip all permission prompts
+whet tools                       # list available tools
+whet config                      # show current configuration
 ```
 
-### Requirements
+## vs Claude Code
 
-- Rust 1.75+
-- [Ollama](https://ollama.com/) (or any supported LLM provider)
+| | Whet | Claude Code |
+|---|---|---|
+| License | MIT (open source) | Proprietary |
+| LLM providers | Any (Ollama, Anthropic, Gemini, OpenAI-compat) | Anthropic only |
+| Offline mode | Yes (with local LLM) | No |
+| Runtime | Single Rust binary | Node.js |
+| Project instructions | `WHET.md` | `CLAUDE.md` |
+| MCP support | Yes | Yes |
+| Permission system | 3 modes | Yes |
+| Context compression | Yes (auto + manual) | Yes |
+
+## Architecture
+
+```
+whet (single binary)
+
+  Terminal (REPL) <--> Agent Loop
+                        |
+                        +-- LLM Provider
+                        |     Ollama / OpenAI / Anthropic / Gemini
+                        |
+                        +-- Tool Executor
+                        |     11 built-in + MCP + Skills
+                        |
+                        +-- Security Layer
+                        |     Path safety, Permissions, Git safety tiers
+                        |
+                        +-- SQLite Memory
+                              Chat history, Resume, Compression
+```
 
 ## Development
 
@@ -270,26 +284,15 @@ cargo fmt -- --check           # check formatting
 cargo clippy --all-targets     # lint
 ```
 
-### CI
-
-All pull requests are checked by GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
-
-| Job | Description |
-|---|---|
-| **Format** | `cargo fmt -- --check` |
-| **Clippy** | `cargo clippy --all-targets` with `-Dwarnings` |
-| **Test** | `cargo test` on Ubuntu and macOS |
-| **Build** | `cargo build --release` |
-
-All checks must pass before merging.
+All pull requests are checked by GitHub Actions: format, clippy, test, and build.
 
 ## Contributing
 
-Contributions are welcome! Please follow these guidelines:
+Contributions are welcome!
 
-- **Issues** — Use [GitHub Issues](https://github.com/kuroko1t/hermitclaw/issues) for bug reports and feature requests. For bugs, include: Rust version, OS, LLM provider/model, steps to reproduce, and error output.
-- **Pull Requests** — Fork the repo, create a feature branch from `main`, ensure `cargo fmt` / `cargo clippy` / `cargo test` all pass, and write a clear PR description.
-- **Commits** — Use imperative mood with category prefix: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
+- **Issues** — Use [GitHub Issues](https://github.com/kuroko1t/whet/issues) for bug reports and feature requests
+- **Pull Requests** — Fork, create a feature branch, ensure all checks pass, and submit a clear PR
+- **Commits** — Use imperative mood with prefix: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
 
 ## License
 

@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn test_load_skills_empty_dir() {
-        let dir = std::env::temp_dir().join("hermitclaw_test_skills_empty");
+        let dir = std::env::temp_dir().join("whet_test_skills_empty");
         std::fs::create_dir_all(&dir).ok();
         let skills = load_skills(dir.to_str().unwrap());
         assert!(skills.is_empty());
@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn test_load_skills_with_md_files() {
-        let dir = std::env::temp_dir().join("hermitclaw_test_skills_md");
+        let dir = std::env::temp_dir().join("whet_test_skills_md");
         std::fs::create_dir_all(&dir).ok();
         std::fs::write(dir.join("coding.md"), "You are a coding assistant.").ok();
         std::fs::write(dir.join("review.md"), "Review code carefully.").ok();

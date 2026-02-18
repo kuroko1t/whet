@@ -76,7 +76,7 @@ impl McpClient {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {
-                "name": "hermitclaw",
+                "name": "whet",
                 "version": "0.1.0"
             }
         });
@@ -349,7 +349,7 @@ for line in sys.stdin:
 
     fn create_mock_mcp_server() -> Result<McpClient, McpError> {
         let script = mock_mcp_script();
-        let script_path = "/tmp/hermitclaw_mock_mcp.py";
+        let script_path = "/tmp/whet_mock_mcp.py";
         std::fs::write(script_path, &script)
             .map_err(|e| McpError::SpawnFailed(format!("Failed to write mock script: {}", e)))?;
         McpClient::new("mock_server", "python3", &[script_path.to_string()])

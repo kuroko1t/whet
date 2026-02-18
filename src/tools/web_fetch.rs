@@ -51,7 +51,7 @@ impl Tool for WebFetchTool {
 
         let response = http_client()
             .get(url)
-            .header("User-Agent", "hermitclaw/0.1.0")
+            .header("User-Agent", "whet/0.1.0")
             .send()
             .map_err(|e| {
                 ToolError::ExecutionFailed(format!("Failed to fetch URL '{}': {}", url, e))

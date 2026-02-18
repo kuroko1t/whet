@@ -83,7 +83,7 @@ for line in sys.stdin:
         msg = args.get("msg", "")
         print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": msg}], "is_error": False}}), flush=True)
 "#;
-        let script_path = "/tmp/hermitclaw_mock_mcp_wrapper.py";
+        let script_path = "/tmp/whet_mock_mcp_wrapper.py";
         std::fs::write(script_path, script)
             .map_err(|e| format!("Failed to write mock script: {}", e))?;
         let client = McpClient::new("test", "python3", &[script_path.to_string()])

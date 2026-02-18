@@ -73,10 +73,24 @@ impl Agent {
         if self.memory.len() <= MAX_CONTEXT_MESSAGES {
             return;
         }
+        self.compress_context_with_instruction(None);
+    }
 
+    /// Manually compress the conversation context.
+    /// If `instruction` is provided, it is appended to the summarization prompt.
+    pub fn compact(&mut self, instruction: Option<&str>) {
+        if self.memory.len() <= 2 {
+            eprintln!("  Nothing to compress.");
+            return;
+        }
+        self.compress_context_with_instruction(instruction);
+    }
+
+    fn compress_context_with_instruction(&mut self, instruction: Option<&str>) {
         // Split: [system_prompt] + [old_messages] + [recent_messages]
         // Keep system prompt (index 0) and the last SUMMARIZE_KEEP_RECENT messages
-        let keep_from = self.memory.len() - SUMMARIZE_KEEP_RECENT;
+        let keep_recent = SUMMARIZE_KEEP_RECENT.min(self.memory.len().saturating_sub(1));
+        let keep_from = self.memory.len() - keep_recent;
 
         if keep_from <= 1 {
             return;
@@ -89,9 +103,14 @@ impl Agent {
         // Drain old messages, keeping system_prompt at index 0
         let system_prompt = self.memory[0].clone();
         // Use the remaining messages (including system prompt) as summarization input
-        self.memory.push(Message::user(
-            "Summarize the conversation so far concisely, preserving key facts, decisions, and context needed for future turns:",
-        ));
+        let summarize_prompt = match instruction {
+            Some(inst) => format!(
+                "Summarize the conversation so far concisely, preserving key facts, decisions, and context needed for future turns. Additional instructions: {}",
+                inst
+            ),
+            None => "Summarize the conversation so far concisely, preserving key facts, decisions, and context needed for future turns:".to_string(),
+        };
+        self.memory.push(Message::user(&summarize_prompt));
 
         // Call LLM without tools for summarization
         let summary = match self.llm.chat(&self.memory, &[]) {
@@ -176,11 +195,19 @@ impl Agent {
                 );
 
                 let result = if let Some(tool) = self.tools.get(&tool_call.name) {
+                    // Determine effective risk level (dynamic for git)
+                    let effective_risk = if tool_call.name == "git" {
+                        let git_cmd = tool_call.arguments["command"].as_str().unwrap_or("");
+                        crate::tools::git::git_command_risk_level(git_cmd)
+                    } else {
+                        tool.risk_level()
+                    };
+
                     // In plan mode, block non-safe tools
-                    if self.config.plan_mode && tool.risk_level() != ToolRiskLevel::Safe {
+                    if self.config.plan_mode && effective_risk != ToolRiskLevel::Safe {
                         "Tool blocked: plan mode is active (read-only). Use /plan to toggle."
                             .to_string()
-                    } else if self.needs_approval(tool.risk_level()) {
+                    } else if self.needs_approval(effective_risk) {
                         if !on_approve(&tool_call.name, &tool_call.arguments) {
                             "Tool execution denied by user.".to_string()
                         } else {
@@ -216,12 +243,9 @@ impl Agent {
                     .push(Message::tool_result(&tool_call.id, &result));
             }
 
-            // If the LLM also returned content alongside tool calls, include it
-            if let Some(content) = &response_content {
-                if !content.is_empty() {
-                    self.memory.push(Message::assistant(content));
-                }
-            }
+            // Content alongside tool calls is already streamed to the user.
+            // Don't add it as a separate memory message — the model would repeat itself.
+            let _ = response_content;
         }
 
         "Max iterations reached. The agent could not complete the task.".to_string()
@@ -337,13 +361,13 @@ mod tests {
                 }],
             },
             LlmResponse {
-                content: Some("The project is named hermitclaw.".to_string()),
+                content: Some("The project is named whet.".to_string()),
                 tool_calls: vec![],
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
         let response = agent.process_message("What is this project?");
-        assert_eq!(response, "The project is named hermitclaw.");
+        assert_eq!(response, "The project is named whet.");
     }
 
     #[test]
@@ -507,12 +531,14 @@ mod tests {
 
         assert_eq!(agent.memory.len(), 1);
         assert_eq!(agent.memory[0].role, Role::System);
-        assert!(agent.memory[0].content.contains("hermitclaw"));
+        assert!(agent.memory[0].content.contains("whet"));
     }
 
     #[test]
     fn test_tool_call_with_content_alongside() {
-        // LLM returns both tool_calls AND content in the same response
+        // LLM returns both tool_calls AND content in the same response.
+        // Content alongside tool calls is NOT stored in memory to prevent
+        // the model from repeating itself in the next iteration.
         let llm = MockLlm::new(vec![
             LlmResponse {
                 content: Some("Let me check that file.".to_string()),
@@ -531,13 +557,16 @@ mod tests {
         let response = agent.process_message("Check Cargo.toml");
         assert_eq!(response, "Done reading.");
 
-        // Memory should have: system + user + assistant_tool_calls + tool_result + assistant("Let me check") + assistant("Done reading")
+        // Memory: system + user + assistant_tool_calls + tool_result + assistant("Done reading.")
+        // Content alongside tool calls ("Let me check") is intentionally dropped from memory.
         let assistant_messages: Vec<_> = agent
             .memory
             .iter()
             .filter(|m| m.role == Role::Assistant)
             .collect();
-        assert!(assistant_messages.len() >= 2);
+        // Only 2 assistant messages: one with tool_calls (empty content), one final response
+        assert_eq!(assistant_messages.len(), 2);
+        assert_eq!(assistant_messages[1].content, "Done reading.");
     }
 
     // --- Streaming callback tests ---
@@ -945,7 +974,7 @@ mod tests {
                     id: "call_0".to_string(),
                     name: "write_file".to_string(),
                     arguments: serde_json::json!({
-                        "path": "/tmp/hermitclaw_perm_test.txt",
+                        "path": "/tmp/whet_perm_test.txt",
                         "content": "test"
                     }),
                 }],
@@ -970,7 +999,7 @@ mod tests {
             "write_file should not need approval in AcceptEdits mode"
         );
         // Cleanup
-        std::fs::remove_file("/tmp/hermitclaw_perm_test.txt").ok();
+        std::fs::remove_file("/tmp/whet_perm_test.txt").ok();
     }
 
     // --- Plan mode tests ---
@@ -1088,6 +1117,6 @@ mod tests {
             .expect("Should have tool result");
         // Should contain actual file content, not a "blocked" message
         assert!(!tool_result.content.contains("plan mode"));
-        assert!(tool_result.content.contains("hermitclaw"));
+        assert!(tool_result.content.contains("whet"));
     }
 }

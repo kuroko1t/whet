@@ -1,5 +1,5 @@
-# hermitclaw configuration
-# Copy to ~/.hermitclaw/config.toml
+# whet configuration
+# Copy to ~/.whet/config.toml
 
 [llm]
 provider = "ollama"          # "ollama" or "openai_compat"
@@ -25,7 +25,7 @@ max_iterations = 10
 # web_enabled = false            # Enable web_fetch and web_search tools (requires internet)
 
 [memory]
-database_path = "~/.hermitclaw/memory.db"
+database_path = "~/.whet/memory.db"
 
 # MCP (Model Context Protocol) servers
 # [[mcp.servers]]

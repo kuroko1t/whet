@@ -63,7 +63,7 @@ mod tests {
     fn test_read_existing_file() {
         let tool = ReadFileTool;
         let result = tool.execute(json!({"path": "Cargo.toml"})).unwrap();
-        assert!(result.contains("hermitclaw"));
+        assert!(result.contains("whet"));
         assert!(result.contains("[package]"));
     }
 
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn test_read_write_roundtrip() {
         // Write a file, then read it back
-        let path = "/tmp/hermitclaw_test_roundtrip.txt";
+        let path = "/tmp/whet_test_roundtrip.txt";
         let content = "roundtrip test content\nline 2";
         std::fs::write(path, content).unwrap();
 

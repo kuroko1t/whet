@@ -1,7 +1,34 @@
 use crate::skills::Skill;
+use std::path::Path;
+
+/// Search from the current directory upward for WHET.md or .whet.md.
+/// Returns the file contents if found, None otherwise.
+pub fn load_project_instructions() -> Option<String> {
+    let dir = std::env::current_dir().ok()?;
+    load_project_instructions_from(&dir)
+}
+
+/// Search from the given directory upward for WHET.md or .whet.md.
+fn load_project_instructions_from(start: &Path) -> Option<String> {
+    let names = ["WHET.md", ".whet.md"];
+    let mut dir = start.to_path_buf();
+
+    loop {
+        for name in &names {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return std::fs::read_to_string(&candidate).ok();
+            }
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
 
 pub fn system_prompt(skills: &[Skill]) -> String {
-    let mut prompt = "You are hermitclaw, an AI coding assistant that runs on the user's machine. You have access to tools that let you read, write, search, and execute commands in the user's project.
+    let mut prompt = "You are whet, an AI coding assistant that runs on the user's machine. You have access to tools that let you read, write, search, and execute commands in the user's project.
 
 ## CORE RULES
 
@@ -60,6 +87,12 @@ Do NOT ask \"which bug?\" or \"what do you mean?\". Investigate on your own.
 - \"Commit the changes\" → git(\"status\") → git(\"add\", \".\") → git(\"commit\", \"-m message\")
 - \"Delete the old config\" → shell(\"rm old_config.toml\")".to_string();
 
+    // Inject project instructions (WHET.md) before skills
+    if let Some(instructions) = load_project_instructions() {
+        prompt.push_str("\n\n## Project Instructions\n\n");
+        prompt.push_str(&instructions);
+    }
+
     if !skills.is_empty() {
         prompt.push_str("\n\n## Skills\n");
         for skill in skills {
@@ -68,4 +101,69 @@ Do NOT ask \"which bug?\" or \"what do you mean?\". Investigate on your own.
     }
 
     prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_system_prompt_contains_whet() {
+        let prompt = system_prompt(&[]);
+        assert!(prompt.contains("whet"));
+    }
+
+    #[test]
+    fn test_system_prompt_with_skills() {
+        let skills = vec![Skill {
+            name: "testing".to_string(),
+            content: "Always write tests.".to_string(),
+        }];
+        let prompt = system_prompt(&skills);
+        assert!(prompt.contains("## Skills"));
+        assert!(prompt.contains("### testing"));
+        assert!(prompt.contains("Always write tests."));
+    }
+
+    #[test]
+    fn test_load_project_instructions_finds_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("WHET.md");
+        fs::write(&file_path, "# Test Instructions\nBuild with cargo.").unwrap();
+
+        let result = load_project_instructions_from(dir.path());
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Test Instructions"));
+    }
+
+    #[test]
+    fn test_load_project_instructions_dotfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(".whet.md");
+        fs::write(&file_path, "# Dotfile Instructions").unwrap();
+
+        let result = load_project_instructions_from(dir.path());
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Dotfile Instructions"));
+    }
+
+    #[test]
+    fn test_load_project_instructions_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = load_project_instructions_from(dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_project_instructions_searches_parent() {
+        let parent = tempfile::tempdir().unwrap();
+        let child = parent.path().join("subdir");
+        fs::create_dir(&child).unwrap();
+        fs::write(parent.path().join("WHET.md"), "Parent instructions").unwrap();
+
+        let result = load_project_instructions_from(&child);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Parent instructions"));
+    }
 }

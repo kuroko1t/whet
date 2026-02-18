@@ -61,8 +61,8 @@ mod tests {
     #[test]
     fn test_write_and_verify() {
         let tool = WriteFileTool;
-        let path = "/tmp/hermitclaw_test_write.txt";
-        let content = "hello from hermitclaw test";
+        let path = "/tmp/whet_test_write.txt";
+        let content = "hello from whet test";
         let result = tool
             .execute(json!({"path": path, "content": content}))
             .unwrap();
@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn test_write_overwrites_existing() {
         let tool = WriteFileTool;
-        let path = "/tmp/hermitclaw_test_overwrite.txt";
+        let path = "/tmp/whet_test_overwrite.txt";
 
         tool.execute(json!({"path": path, "content": "first"}))
             .unwrap();
@@ -127,7 +127,7 @@ mod tests {
     fn test_write_nonexistent_parent_dir() {
         let tool = WriteFileTool;
         let result = tool.execute(json!({
-            "path": "/tmp/hermitclaw_nonexistent_dir_xyz/file.txt",
+            "path": "/tmp/whet_nonexistent_dir_xyz/file.txt",
             "content": "hello"
         }));
         assert!(result.is_err());
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn test_write_empty_content() {
         let tool = WriteFileTool;
-        let path = "/tmp/hermitclaw_test_empty.txt";
+        let path = "/tmp/whet_test_empty.txt";
         let result = tool.execute(json!({"path": path, "content": ""})).unwrap();
         assert!(result.contains("Successfully wrote"));
 

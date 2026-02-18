@@ -82,7 +82,7 @@
     <circle cx="26" cy="8" r="2.5" fill="#45e96a" opacity="0.8"/>
     <!-- Terminal text lines -->
     <g filter="url(#glow)" opacity="0.9">
-      <text x="8" y="25" font-family="monospace" font-size="8" fill="#45e96a">$ hermitclaw</text>
+      <text x="8" y="25" font-family="monospace" font-size="8" fill="#45e96a">$ whet</text>
       <text x="8" y="35" font-family="monospace" font-size="7" fill="#e94560">&#x276F; ready</text>
       <rect x="8" y="40" width="4" height="8" fill="#45e96a" opacity="0.8">
         <animate attributeName="opacity" values="0.8;0.2;0.8" dur="1.2s" repeatCount="indefinite"/>

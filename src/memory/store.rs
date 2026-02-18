@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_file_based_store() {
-        let path = "/tmp/hermitclaw_test_memory.db";
+        let path = "/tmp/whet_test_memory.db";
         // Clean up from previous runs
         std::fs::remove_file(path).ok();
 

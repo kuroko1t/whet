@@ -73,7 +73,7 @@ fn default_context_compression() -> bool {
 }
 
 fn default_skills_dir() -> String {
-    "~/.hermitclaw/skills".to_string()
+    "~/.whet/skills".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -110,10 +110,10 @@ impl Default for Config {
                 permission_mode: PermissionMode::Default,
                 web_enabled: false,
                 context_compression: true,
-                skills_dir: "~/.hermitclaw/skills".to_string(),
+                skills_dir: "~/.whet/skills".to_string(),
             },
             memory: MemoryConfig {
-                database_path: "~/.hermitclaw/memory.db".to_string(),
+                database_path: "~/.whet/memory.db".to_string(),
             },
             mcp: McpConfig::default(),
         }
@@ -133,10 +133,10 @@ impl Config {
         toml::to_string_pretty(self)
     }
 
-    /// Load config from ~/.hermitclaw/config.toml, falling back to defaults.
+    /// Load config from ~/.whet/config.toml, falling back to defaults.
     pub fn load() -> Self {
         let config_path = if let Some(home) = dirs::home_dir() {
-            home.join(".hermitclaw").join("config.toml")
+            home.join(".whet").join("config.toml")
         } else {
             return Self::default();
         };
@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(config.llm.model, "qwen2.5:7b");
         assert_eq!(config.llm.base_url, "http://localhost:11434");
         assert_eq!(config.agent.max_iterations, 10);
-        assert_eq!(config.memory.database_path, "~/.hermitclaw/memory.db");
+        assert_eq!(config.memory.database_path, "~/.whet/memory.db");
     }
 
     #[test]
@@ -280,7 +280,7 @@ base_url = "http://localhost:11434"
 max_iterations = 10
 
 [memory]
-database_path = "~/.hermitclaw/memory.db"
+database_path = "~/.whet/memory.db"
 "#;
         let config = Config::from_toml(toml_str).unwrap();
         assert!(config.llm.api_key.is_none());
@@ -299,7 +299,7 @@ base_url = "http://localhost:11434"
 max_iterations = 10
 
 [memory]
-database_path = "~/.hermitclaw/memory.db"
+database_path = "~/.whet/memory.db"
 "#;
         let config = Config::from_toml(toml_str).unwrap();
         assert!(!config.llm.streaming);
@@ -318,7 +318,7 @@ base_url = "http://localhost:11434"
 max_iterations = 10
 
 [memory]
-database_path = "~/.hermitclaw/memory.db"
+database_path = "~/.whet/memory.db"
 "#;
         let config = Config::from_toml(toml_str).unwrap();
         assert!(config.mcp.servers.is_empty());

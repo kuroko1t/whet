@@ -125,7 +125,7 @@ for line in sys.stdin:
         args = req.get("params", {}).get("arguments", {})
         print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": "ok"}], "is_error": False}}), flush=True)
 "#;
-        let script_path = "/tmp/hermitclaw_mock_mcp_register.py";
+        let script_path = "/tmp/whet_mock_mcp_register.py";
         if std::fs::write(script_path, script).is_err() {
             eprintln!("Skipping: cannot write mock script");
             return;

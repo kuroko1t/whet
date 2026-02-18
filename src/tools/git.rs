@@ -1,26 +1,62 @@
 use super::{Tool, ToolError};
+use crate::config::ToolRiskLevel;
 use serde_json::json;
 use std::process::Command;
 
 pub struct GitTool;
 
-const ALLOWED_COMMANDS: &[&str] = &[
-    "status", "diff", "log", "add", "commit", "branch", "show", "stash",
-];
+/// Commands that are always allowed without approval (read-only).
+const SAFE_COMMANDS: &[&str] = &["status", "diff", "log", "show", "branch", "stash"];
 
-const BLOCKED_COMMANDS: &[&str] = &[
-    "push",
-    "reset",
-    "clean",
+/// Commands that require user approval before execution.
+const APPROVAL_COMMANDS: &[&str] = &[
+    "add",
+    "commit",
     "checkout",
-    "rebase",
-    "merge",
+    "switch",
     "pull",
     "fetch",
+    "push",
+    "merge",
+    "tag",
+    "cherry-pick",
     "remote",
-    "clone",
-    "force-push",
 ];
+
+/// Commands that are always blocked regardless of approval.
+const BLOCKED_COMMANDS: &[&str] = &["clean", "rebase"];
+
+/// Detect dangerous argument patterns that should always be blocked.
+fn has_dangerous_args(command: &str, args: &[String]) -> Option<String> {
+    match command {
+        "reset" => {
+            if args.iter().any(|a| a == "--hard") {
+                return Some("git reset --hard is blocked for safety".to_string());
+            }
+            // soft/mixed reset is allowed with approval
+            None
+        }
+        "push" => {
+            if args
+                .iter()
+                .any(|a| a == "--force" || a == "-f" || a == "--force-with-lease")
+            {
+                return Some("git push --force is blocked for safety".to_string());
+            }
+            None
+        }
+        "clean" => Some("git clean is blocked for safety (can delete untracked files)".to_string()),
+        "rebase" => {
+            if args.iter().any(|a| a == "-i" || a == "--interactive") {
+                return Some(
+                    "git rebase -i is blocked (interactive mode not supported)".to_string(),
+                );
+            }
+            Some("git rebase is blocked for safety".to_string())
+        }
+        _ => None,
+    }
+}
 
 impl Tool for GitTool {
     fn name(&self) -> &str {
@@ -28,7 +64,8 @@ impl Tool for GitTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a git command (safe commands only: status, diff, log, add, commit, branch, show, stash)"
+        "Execute a git command. Safe commands (status, diff, log, show, branch, stash) run freely. \
+         Others (add, commit, checkout, switch, pull, fetch, push, merge, tag, cherry-pick, remote, reset) require approval."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -37,7 +74,7 @@ impl Tool for GitTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The git subcommand (e.g., 'status', 'diff', 'log')"
+                    "description": "The git subcommand (e.g., 'status', 'diff', 'log', 'add', 'commit', 'push')"
                 },
                 "args": {
                     "type": "string",
@@ -48,33 +85,53 @@ impl Tool for GitTool {
         })
     }
 
+    fn risk_level(&self) -> ToolRiskLevel {
+        // Default risk level — actual risk is determined per-command in execute().
+        // We return Moderate so that approval is requested for non-safe commands in default permission mode.
+        // Safe commands bypass this via the agent's permission check since we override at execute time.
+        ToolRiskLevel::Moderate
+    }
+
     fn execute(&self, args: serde_json::Value) -> Result<String, ToolError> {
         let command = args["command"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'command' argument".to_string()))?;
         let extra_args = args["args"].as_str().unwrap_or("");
+        let parsed_args = shell_split(extra_args);
 
-        // Check if command is blocked
+        // Always-blocked commands
         if BLOCKED_COMMANDS.contains(&command) {
+            if let Some(reason) = has_dangerous_args(command, &parsed_args) {
+                return Err(ToolError::PermissionDenied(reason));
+            }
             return Err(ToolError::PermissionDenied(format!(
-                "git {} is blocked for safety. Allowed commands: {}",
-                command,
-                ALLOWED_COMMANDS.join(", ")
+                "git {} is blocked for safety",
+                command
             )));
         }
 
-        // Check if command is in allowlist
-        if !ALLOWED_COMMANDS.contains(&command) {
+        // Check for dangerous argument patterns on approval commands
+        if let Some(reason) = has_dangerous_args(command, &parsed_args) {
+            return Err(ToolError::PermissionDenied(reason));
+        }
+
+        // Validate the command is in one of the known categories
+        let is_safe = SAFE_COMMANDS.contains(&command);
+        let is_approval = APPROVAL_COMMANDS.contains(&command);
+        // Allow "reset" as approval-required (dangerous patterns already caught above)
+        let is_reset = command == "reset";
+
+        if !is_safe && !is_approval && !is_reset {
             return Err(ToolError::PermissionDenied(format!(
-                "git {} is not allowed. Allowed commands: {}",
+                "git {} is not allowed. Allowed commands: {}, {}",
                 command,
-                ALLOWED_COMMANDS.join(", ")
+                SAFE_COMMANDS.join(", "),
+                APPROVAL_COMMANDS.join(", ")
             )));
         }
 
         // Special check: commit requires -m flag to prevent interactive editor
         if command == "commit" {
-            let parsed_args = shell_split(extra_args);
             let has_m_flag = parsed_args.iter().any(|a| a == "-m" || a.starts_with("-m"));
             if !has_m_flag {
                 return Err(ToolError::InvalidArguments(
@@ -88,7 +145,7 @@ impl Tool for GitTool {
 
         // Parse extra args by splitting on whitespace (respecting quotes)
         if !extra_args.is_empty() {
-            for arg in shell_split(extra_args) {
+            for arg in &parsed_args {
                 cmd.arg(arg);
             }
         }
@@ -117,6 +174,16 @@ impl Tool for GitTool {
         }
 
         Ok(result)
+    }
+}
+
+/// Returns the risk level for a specific git subcommand.
+/// Safe commands return Safe, approval commands return Moderate.
+pub fn git_command_risk_level(command: &str) -> ToolRiskLevel {
+    if SAFE_COMMANDS.contains(&command) {
+        ToolRiskLevel::Safe
+    } else {
+        ToolRiskLevel::Moderate
     }
 }
 
@@ -187,10 +254,18 @@ mod tests {
         assert!(result.contains("main") || result.contains("master") || !result.is_empty());
     }
 
+    // --- Approval-required commands ---
+
     #[test]
-    fn test_git_push_blocked() {
+    fn test_git_push_is_approval_required() {
+        // push is now allowed (with approval), not blocked
+        assert!(APPROVAL_COMMANDS.contains(&"push"));
+    }
+
+    #[test]
+    fn test_git_push_force_blocked() {
         let tool = GitTool;
-        let result = tool.execute(json!({"command": "push"}));
+        let result = tool.execute(json!({"command": "push", "args": "--force"}));
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -199,14 +274,42 @@ mod tests {
     }
 
     #[test]
-    fn test_git_reset_blocked() {
+    fn test_git_push_force_f_blocked() {
         let tool = GitTool;
-        let result = tool.execute(json!({"command": "reset"}));
+        let result = tool.execute(json!({"command": "push", "args": "-f origin main"}));
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
             ToolError::PermissionDenied(_)
         ));
+    }
+
+    // --- Always-blocked commands ---
+
+    #[test]
+    fn test_git_reset_hard_blocked() {
+        let tool = GitTool;
+        let result = tool.execute(json!({"command": "reset", "args": "--hard HEAD~1"}));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
+    }
+
+    #[test]
+    fn test_git_reset_soft_allowed() {
+        // reset --soft is allowed (with approval) — it just might not change anything
+        let tool = GitTool;
+        let result = tool.execute(json!({"command": "reset", "args": "--soft HEAD"}));
+        // Should not be PermissionDenied
+        match result {
+            Ok(_) => {}
+            Err(ToolError::PermissionDenied(msg)) => {
+                panic!("reset --soft should not be blocked: {}", msg)
+            }
+            Err(_) => {} // git itself may error, that's fine
+        }
     }
 
     #[test]
@@ -218,6 +321,26 @@ mod tests {
             result.unwrap_err(),
             ToolError::PermissionDenied(_)
         ));
+    }
+
+    #[test]
+    fn test_git_rebase_blocked() {
+        let tool = GitTool;
+        let result = tool.execute(json!({"command": "rebase"}));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
+    }
+
+    #[test]
+    fn test_git_rebase_interactive_blocked() {
+        let tool = GitTool;
+        let result = tool.execute(json!({"command": "rebase", "args": "-i HEAD~3"}));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("interactive"));
     }
 
     #[test]
@@ -275,25 +398,8 @@ mod tests {
         assert!(args.is_empty());
     }
 
-    // --- Test all blocked commands individually ---
-
-    #[test]
-    fn test_git_all_blocked_commands() {
-        let tool = GitTool;
-        for cmd in BLOCKED_COMMANDS {
-            let result = tool.execute(json!({"command": cmd}));
-            assert!(result.is_err(), "git {} should be blocked", cmd);
-            assert!(
-                matches!(result.unwrap_err(), ToolError::PermissionDenied(_)),
-                "git {} should return PermissionDenied",
-                cmd
-            );
-        }
-    }
-
     #[test]
     fn test_git_commit_without_m_false_positive_rejected() {
-        // Args like "--allow-multiple" should NOT satisfy the -m requirement
         let tool = GitTool;
         let result = tool.execute(json!({"command": "commit", "args": "--allow-multiple"}));
         assert!(result.is_err());
@@ -304,12 +410,10 @@ mod tests {
     #[test]
     fn test_git_commit_with_m_flag_is_accepted() {
         let tool = GitTool;
-        // This should NOT error on the -m check (may error on git itself if nothing staged)
         let result = tool.execute(json!({"command": "commit", "args": "-m 'test message'"}));
-        // We're just checking it doesn't get rejected for missing -m
         match result {
-            Ok(_) => {}                              // Succeeded (something was staged)
-            Err(ToolError::ExecutionFailed(_)) => {} // git itself errored (nothing to commit)
+            Ok(_) => {}
+            Err(ToolError::ExecutionFailed(_)) => {}
             Err(ToolError::InvalidArguments(msg)) => {
                 panic!("Should not get InvalidArguments with -m flag: {}", msg);
             }
@@ -354,10 +458,68 @@ mod tests {
     #[test]
     fn test_git_error_messages_contain_allowed_list() {
         let tool = GitTool;
-        let result = tool.execute(json!({"command": "push"}));
+        let result = tool.execute(json!({"command": "bisect"}));
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("status"));
         assert!(err_msg.contains("diff"));
         assert!(err_msg.contains("log"));
+    }
+
+    // --- Risk level tests ---
+
+    #[test]
+    fn test_git_command_risk_level_safe() {
+        assert_eq!(git_command_risk_level("status"), ToolRiskLevel::Safe);
+        assert_eq!(git_command_risk_level("diff"), ToolRiskLevel::Safe);
+        assert_eq!(git_command_risk_level("log"), ToolRiskLevel::Safe);
+        assert_eq!(git_command_risk_level("show"), ToolRiskLevel::Safe);
+        assert_eq!(git_command_risk_level("branch"), ToolRiskLevel::Safe);
+        assert_eq!(git_command_risk_level("stash"), ToolRiskLevel::Safe);
+    }
+
+    #[test]
+    fn test_git_command_risk_level_moderate() {
+        assert_eq!(git_command_risk_level("add"), ToolRiskLevel::Moderate);
+        assert_eq!(git_command_risk_level("commit"), ToolRiskLevel::Moderate);
+        assert_eq!(git_command_risk_level("push"), ToolRiskLevel::Moderate);
+        assert_eq!(git_command_risk_level("checkout"), ToolRiskLevel::Moderate);
+        assert_eq!(git_command_risk_level("merge"), ToolRiskLevel::Moderate);
+    }
+
+    // --- Approval commands are accepted ---
+
+    #[test]
+    fn test_git_checkout_accepted() {
+        assert!(APPROVAL_COMMANDS.contains(&"checkout"));
+    }
+
+    #[test]
+    fn test_git_switch_accepted() {
+        assert!(APPROVAL_COMMANDS.contains(&"switch"));
+    }
+
+    #[test]
+    fn test_git_fetch_accepted() {
+        assert!(APPROVAL_COMMANDS.contains(&"fetch"));
+    }
+
+    #[test]
+    fn test_git_merge_accepted() {
+        assert!(APPROVAL_COMMANDS.contains(&"merge"));
+    }
+
+    #[test]
+    fn test_git_tag_accepted() {
+        assert!(APPROVAL_COMMANDS.contains(&"tag"));
+    }
+
+    #[test]
+    fn test_git_cherry_pick_accepted() {
+        assert!(APPROVAL_COMMANDS.contains(&"cherry-pick"));
+    }
+
+    #[test]
+    fn test_git_remote_accepted() {
+        assert!(APPROVAL_COMMANDS.contains(&"remote"));
     }
 }

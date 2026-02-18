@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_apply_simple_diff() {
-        let path = "/tmp/hermitclaw_test_diff_simple.txt";
+        let path = "/tmp/whet_test_diff_simple.txt";
         setup_test_file(path, "line1\nline2\nline3\nline4\n");
 
         let tool = ApplyDiffTool;
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_apply_diff_with_context() {
-        let path = "/tmp/hermitclaw_test_diff_ctx.txt";
+        let path = "/tmp/whet_test_diff_ctx.txt";
         setup_test_file(path, "a\nb\nc\nd\ne\n");
 
         let tool = ApplyDiffTool;
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_apply_diff_add_lines() {
-        let path = "/tmp/hermitclaw_test_diff_add.txt";
+        let path = "/tmp/whet_test_diff_add.txt";
         setup_test_file(path, "line1\nline2\nline3\n");
 
         let tool = ApplyDiffTool;
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_apply_diff_remove_lines() {
-        let path = "/tmp/hermitclaw_test_diff_rm.txt";
+        let path = "/tmp/whet_test_diff_rm.txt";
         setup_test_file(path, "a\nb\nc\nd\ne\n");
 
         let tool = ApplyDiffTool;
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_apply_multi_hunk_diff() {
-        let path = "/tmp/hermitclaw_test_diff_multi.txt";
+        let path = "/tmp/whet_test_diff_multi.txt";
         setup_test_file(path, "a\nb\nc\nd\ne\nf\ng\nh\n");
 
         let tool = ApplyDiffTool;
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_apply_diff_with_file_headers() {
-        let path = "/tmp/hermitclaw_test_diff_headers.txt";
+        let path = "/tmp/whet_test_diff_headers.txt";
         setup_test_file(path, "old\n");
 
         let tool = ApplyDiffTool;
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_apply_diff_no_hunks() {
-        let path = "/tmp/hermitclaw_test_diff_nohunks.txt";
+        let path = "/tmp/whet_test_diff_nohunks.txt";
         setup_test_file(path, "content\n");
 
         let tool = ApplyDiffTool;
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_apply_diff_old_start_zero_rejected() {
-        let path = "/tmp/hermitclaw_test_diff_zero.txt";
+        let path = "/tmp/whet_test_diff_zero.txt";
         setup_test_file(path, "line1\nline2\n");
 
         let tool = ApplyDiffTool;
@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn test_apply_diff_preserves_original_whitespace() {
         // Context lines should preserve the original file's whitespace, not the diff's
-        let path = "/tmp/hermitclaw_test_diff_ws.txt";
+        let path = "/tmp/whet_test_diff_ws.txt";
         setup_test_file(path, "  indented\nnormal\n  also indented\n");
 
         let tool = ApplyDiffTool;

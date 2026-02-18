@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_list_empty_directory() {
-        let dir = "/tmp/hermitclaw_test_empty_dir";
+        let dir = "/tmp/whet_test_empty_dir";
         fs::create_dir_all(dir).ok();
         // Remove all contents
         if let Ok(entries) = fs::read_dir(dir) {

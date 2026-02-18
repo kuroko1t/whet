@@ -59,11 +59,16 @@ fn create_provider(cfg: &Config, model: &str) -> Box<dyn LlmProvider> {
 }
 
 #[derive(Parser)]
-#[command(name = "hermitclaw")]
-#[command(about = "Fully offline, secure-by-default AI agent. The hermit needs no network.")]
+#[command(name = "whet")]
+#[command(version)]
+#[command(about = "An open-source terminal coding agent. Powered by local or cloud LLMs.")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+
+    /// Single-shot prompt (e.g., whet "fix the bug")
+    #[arg(trailing_var_arg = true, num_args = 0..)]
+    prompt: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -210,29 +215,29 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
     let loaded_skills = skills::load_skills(&cfg.agent.skills_dir);
 
     // Single-shot mode
-    if let Some(msg) = message {
+    if let Some(msg) = message.filter(|m| !m.trim().is_empty()) {
         let mut agent = setup_agent(&cfg, &model, &loaded_skills, yolo);
 
-        let response = agent.process_message_with_callbacks(
-            &msg,
-            &mut |token| {
-                print!("{}", token);
-            },
-            &mut |_, _| yolo, // In single-shot without -y, deny by default
-        );
-
-        // If non-streaming, print the full response
-        if !cfg.llm.streaming {
-            println!("{}", response);
-        } else {
+        if cfg.llm.streaming {
+            agent.process_message_with_callbacks(
+                &msg,
+                &mut |token| {
+                    print!("{}", token);
+                },
+                &mut |_, _| yolo,
+            );
             println!();
+        } else {
+            let response =
+                agent.process_message_with_callbacks(&msg, &mut |_| {}, &mut |_, _| yolo);
+            println!("{}", response);
         }
         return;
     }
 
     // Interactive mode
-    println!("{}", "hermitclaw v0.1.0".bold());
-    println!("The hermit needs no network.\n");
+    println!("{}", "whet v0.1.0".bold());
+    println!("Terminal coding agent.\n");
     println!("Model: {}", model.green());
     println!(
         "Permission: {}",
@@ -334,6 +339,14 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
         }
     };
 
+    // Load persistent input history
+    let history_path = dirs::home_dir()
+        .map(|h| h.join(".whet").join("history.txt"))
+        .unwrap_or_default();
+    if history_path.exists() {
+        let _ = rl.load_history(&history_path);
+    }
+
     loop {
         let readline = rl.readline(&format!("{} ", "you>".blue().bold()));
         match readline {
@@ -358,7 +371,6 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
                             agent.llm = provider;
                             continue;
                         }
-                        SlashResult::NotACommand => {} // Pass through to LLM
                     }
                 }
 
@@ -411,6 +423,11 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
             }
             Err(rustyline::error::ReadlineError::Eof) => {
                 println!("\nGoodbye!");
+                // Save input history
+                if let Some(parent) = history_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = rl.save_history(&history_path);
                 break;
             }
             Err(err) => {
@@ -424,7 +441,6 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
 enum SlashResult {
     Handled,
     NewProvider(Box<dyn LlmProvider>),
-    NotACommand,
 }
 
 fn handle_slash_command(
@@ -529,6 +545,38 @@ fn handle_slash_command(
             }
             SlashResult::Handled
         }
+        "/init" => {
+            let path = std::path::Path::new("WHET.md");
+            if path.exists() {
+                eprintln!(
+                    "{} WHET.md already exists in the current directory.",
+                    "Error:".red()
+                );
+            } else {
+                let template = "\
+# Project Instructions
+
+## Build & Test
+- (Add build commands here)
+
+## Code Style
+- Follow existing patterns in the codebase
+
+## Important Context
+- (Add project-specific notes here)
+";
+                match std::fs::write(path, template) {
+                    Ok(_) => println!("{} Created {}", ">>".green(), "WHET.md".cyan()),
+                    Err(e) => eprintln!("{} Failed to create WHET.md: {}", "Error:".red(), e),
+                }
+            }
+            SlashResult::Handled
+        }
+        "/compact" => {
+            let instruction = if arg.is_empty() { None } else { Some(arg) };
+            agent.compact(instruction);
+            SlashResult::Handled
+        }
         "/help" => {
             println!("{}", "Available commands:".bold());
             println!("  {} <name>  - Switch LLM model", "/model".cyan());
@@ -543,6 +591,11 @@ fn handle_slash_command(
             println!(
                 "  {} [cmd]   - Run test-fix loop (default: cargo test)",
                 "/test".cyan()
+            );
+            println!("  {}           - Generate WHET.md template", "/init".cyan());
+            println!(
+                "  {} [msg] - Compress conversation context",
+                "/compact".cyan()
             );
             println!("  {}         - List loaded skills", "/skills".cyan());
             println!(
@@ -566,7 +619,15 @@ fn handle_slash_command(
             println!("{}", "Conversation cleared.".green());
             SlashResult::Handled
         }
-        _ => SlashResult::NotACommand,
+        _ => {
+            eprintln!(
+                "{} Unknown command '{}'. Type {} for available commands.",
+                "Error:".red(),
+                cmd,
+                "/help".cyan()
+            );
+            SlashResult::Handled
+        }
     }
 }
 
@@ -668,16 +729,16 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Chat {
+        Some(Commands::Chat {
             model,
             r#continue,
             new: _,
             message,
             yolo,
-        } => {
+        }) => {
             run_chat(model, r#continue, message, yolo);
         }
-        Commands::Tools => {
+        Some(Commands::Tools) => {
             let cfg = Config::load();
             let mut registry = default_registry();
             if cfg.agent.web_enabled {
@@ -692,7 +753,7 @@ fn main() {
                 println!("  {} - {}", tool.name().cyan(), tool.description());
             }
         }
-        Commands::Config => {
+        Some(Commands::Config) => {
             let config = Config::load();
             println!("{}", "Current configuration:".bold());
             println!();
@@ -700,6 +761,16 @@ fn main() {
                 Ok(s) => println!("{}", s),
                 Err(e) => eprintln!("Error serializing config: {}", e),
             }
+        }
+        None => {
+            // Default: `whet` alone or `whet "fix the bug"`
+            let prompt_text = cli.prompt.join(" ");
+            let message = if prompt_text.is_empty() {
+                None
+            } else {
+                Some(prompt_text)
+            };
+            run_chat(None, false, message, false);
         }
     }
 }

@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_repo_map_no_source_files() {
-        let dir = "/tmp/hermitclaw_test_repo_map_nosrc";
+        let dir = "/tmp/whet_test_repo_map_nosrc";
         std::fs::create_dir_all(dir).ok();
         std::fs::write(format!("{}/readme.md", dir), "# Hello").unwrap();
         std::fs::write(format!("{}/config.toml", dir), "[section]").unwrap();
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn test_repo_map_skips_node_modules() {
-        let dir = "/tmp/hermitclaw_test_repo_map_skip";
+        let dir = "/tmp/whet_test_repo_map_skip";
         std::fs::create_dir_all(format!("{}/node_modules/pkg", dir)).ok();
         std::fs::write(format!("{}/app.js", dir), "function main() {}").unwrap();
         std::fs::write(
@@ -677,7 +677,7 @@ mod tests {
 
     #[test]
     fn test_symbols_include_line_numbers() {
-        let dir = "/tmp/hermitclaw_test_repo_map_lineno";
+        let dir = "/tmp/whet_test_repo_map_lineno";
         std::fs::create_dir_all(dir).ok();
         std::fs::write(
             format!("{}/test.rs", dir),

@@ -202,9 +202,9 @@ mod tests {
     fn test_grep_finds_pattern_in_file() {
         let tool = GrepTool;
         let result = tool
-            .execute(json!({"pattern": "hermitclaw", "path": "Cargo.toml"}))
+            .execute(json!({"pattern": "whet", "path": "Cargo.toml"}))
             .unwrap();
-        assert!(result.contains("hermitclaw"));
+        assert!(result.contains("whet"));
         assert!(result.contains("Cargo.toml:"));
     }
 
@@ -230,20 +230,16 @@ mod tests {
     fn test_grep_case_insensitive() {
         let tool = GrepTool;
         let result = tool
-            .execute(
-                json!({"pattern": "HERMITCLAW", "path": "Cargo.toml", "case_insensitive": true}),
-            )
+            .execute(json!({"pattern": "WHET", "path": "Cargo.toml", "case_insensitive": true}))
             .unwrap();
-        assert!(result.contains("hermitclaw"));
+        assert!(result.contains("whet"));
     }
 
     #[test]
     fn test_grep_case_sensitive_no_match() {
         let tool = GrepTool;
         let result = tool
-            .execute(
-                json!({"pattern": "HERMITCLAW", "path": "Cargo.toml", "case_insensitive": false}),
-            )
+            .execute(json!({"pattern": "WHET", "path": "Cargo.toml", "case_insensitive": false}))
             .unwrap();
         assert_eq!(result, "No matches found.");
     }
@@ -252,8 +248,8 @@ mod tests {
     fn test_grep_default_path() {
         let tool = GrepTool;
         // Default path should be "."
-        let result = tool.execute(json!({"pattern": "hermitclaw"})).unwrap();
-        assert!(result.contains("hermitclaw"));
+        let result = tool.execute(json!({"pattern": "whet"})).unwrap();
+        assert!(result.contains("whet"));
     }
 
     #[test]
@@ -280,7 +276,7 @@ mod tests {
     #[test]
     fn test_grep_line_numbers() {
         // Create a test file with known content
-        let path = "/tmp/hermitclaw_test_grep.txt";
+        let path = "/tmp/whet_test_grep.txt";
         fs::write(path, "line one\nline two\nfind me\nline four\n").unwrap();
 
         let tool = GrepTool;
@@ -295,7 +291,7 @@ mod tests {
 
     #[test]
     fn test_grep_skips_binary_files() {
-        let path = "/tmp/hermitclaw_test_binary.bin";
+        let path = "/tmp/whet_test_binary.bin";
         let mut content = vec![0u8; 100];
         content[50] = 0; // NULL byte
         fs::write(path, &content).unwrap();
@@ -312,7 +308,7 @@ mod tests {
     #[test]
     fn test_grep_max_results_truncation() {
         // Create a file with more than MAX_RESULTS matching lines
-        let dir = "/tmp/hermitclaw_test_grep_max";
+        let dir = "/tmp/whet_test_grep_max";
         fs::create_dir_all(dir).ok();
         let path = format!("{}/many_matches.txt", dir);
         let content: String = (0..150).map(|i| format!("match_line {}\n", i)).collect();
@@ -349,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_grep_skips_large_files() {
-        let dir = "/tmp/hermitclaw_test_grep_large";
+        let dir = "/tmp/whet_test_grep_large";
         fs::create_dir_all(dir).ok();
         let path = format!("{}/large.txt", dir);
         // Create a file larger than 1MB
@@ -368,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_grep_single_file_search() {
-        let path = "/tmp/hermitclaw_test_grep_single.txt";
+        let path = "/tmp/whet_test_grep_single.txt";
         fs::write(path, "alpha\nbeta\ngamma\n").unwrap();
 
         let tool = GrepTool;
@@ -396,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_is_binary_with_text_file() {
-        let path = "/tmp/hermitclaw_test_not_binary.txt";
+        let path = "/tmp/whet_test_not_binary.txt";
         fs::write(path, "just plain text\nwith newlines\n").unwrap();
         assert!(!is_binary(Path::new(path)));
         fs::remove_file(path).ok();
@@ -404,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_is_binary_with_null_bytes() {
-        let path = "/tmp/hermitclaw_test_is_binary.bin";
+        let path = "/tmp/whet_test_is_binary.bin";
         let mut data = b"some text".to_vec();
         data.push(0); // NULL byte
         data.extend_from_slice(b"more text");

@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_edit_file_basic_replacement() {
-        let path = "/tmp/hermitclaw_test_edit_basic.txt";
+        let path = "/tmp/whet_test_edit_basic.txt";
         setup_test_file(path, "Hello World\nGoodbye World\n");
 
         let tool = EditFileTool;
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_edit_file_old_text_not_found() {
-        let path = "/tmp/hermitclaw_test_edit_notfound.txt";
+        let path = "/tmp/whet_test_edit_notfound.txt";
         setup_test_file(path, "Hello World\n");
 
         let tool = EditFileTool;
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_edit_file_multiple_matches() {
-        let path = "/tmp/hermitclaw_test_edit_multi.txt";
+        let path = "/tmp/whet_test_edit_multi.txt";
         setup_test_file(path, "foo bar foo\nbaz foo\n");
 
         let tool = EditFileTool;
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_edit_file_preserves_rest() {
-        let path = "/tmp/hermitclaw_test_edit_preserve.txt";
+        let path = "/tmp/whet_test_edit_preserve.txt";
         let original = "line1\nline2\nline3\nline4\nline5\n";
         setup_test_file(path, original);
 
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_edit_file_unicode_content() {
-        let path = "/tmp/hermitclaw_test_edit_unicode.txt";
+        let path = "/tmp/whet_test_edit_unicode.txt";
         setup_test_file(path, "こんにちは世界\nRust言語\n");
 
         let tool = EditFileTool;
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_edit_file_empty_replacement() {
-        let path = "/tmp/hermitclaw_test_edit_empty.txt";
+        let path = "/tmp/whet_test_edit_empty.txt";
         setup_test_file(path, "keep this\nremove this\nkeep too\n");
 
         let tool = EditFileTool;
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_edit_file_multiline_replacement() {
-        let path = "/tmp/hermitclaw_test_edit_multiline.txt";
+        let path = "/tmp/whet_test_edit_multiline.txt";
         setup_test_file(path, "start\nold line 1\nold line 2\nend\n");
 
         let tool = EditFileTool;
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_edit_file_context_output() {
-        let path = "/tmp/hermitclaw_test_edit_context.txt";
+        let path = "/tmp/whet_test_edit_context.txt";
         setup_test_file(path, "line1\nline2\nline3\nTARGET\nline5\nline6\nline7\n");
 
         let tool = EditFileTool;
