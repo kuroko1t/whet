@@ -154,25 +154,39 @@ fn html_to_text(html: &str) -> String {
             if remaining.starts_with("&amp;") {
                 text.push('&');
                 // Skip the remaining 4 chars of "&amp;"
-                for _ in 0..4 { chars.next(); }
+                for _ in 0..4 {
+                    chars.next();
+                }
             } else if remaining.starts_with("&lt;") {
                 text.push('<');
-                for _ in 0..3 { chars.next(); }
+                for _ in 0..3 {
+                    chars.next();
+                }
             } else if remaining.starts_with("&gt;") {
                 text.push('>');
-                for _ in 0..3 { chars.next(); }
+                for _ in 0..3 {
+                    chars.next();
+                }
             } else if remaining.starts_with("&quot;") {
                 text.push('"');
-                for _ in 0..5 { chars.next(); }
+                for _ in 0..5 {
+                    chars.next();
+                }
             } else if remaining.starts_with("&#39;") {
                 text.push('\'');
-                for _ in 0..4 { chars.next(); }
+                for _ in 0..4 {
+                    chars.next();
+                }
             } else if remaining.starts_with("&apos;") {
                 text.push('\'');
-                for _ in 0..5 { chars.next(); }
+                for _ in 0..5 {
+                    chars.next();
+                }
             } else if remaining.starts_with("&nbsp;") {
                 text.push(' ');
-                for _ in 0..5 { chars.next(); }
+                for _ in 0..5 {
+                    chars.next();
+                }
             } else {
                 text.push('&');
             }

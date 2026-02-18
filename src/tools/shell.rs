@@ -55,20 +55,28 @@ impl Tool for ShellTool {
         let timeout = Duration::from_secs(COMMAND_TIMEOUT_SECS);
         match child.wait_timeout(timeout) {
             Ok(Some(status)) => {
-                let stdout = child.stdout.take().map(|s| {
-                    use std::io::Read;
-                    let mut buf = Vec::new();
-                    let mut reader = s;
-                    let _ = reader.read_to_end(&mut buf);
-                    buf
-                }).unwrap_or_default();
-                let stderr = child.stderr.take().map(|s| {
-                    use std::io::Read;
-                    let mut buf = Vec::new();
-                    let mut reader = s;
-                    let _ = reader.read_to_end(&mut buf);
-                    buf
-                }).unwrap_or_default();
+                let stdout = child
+                    .stdout
+                    .take()
+                    .map(|s| {
+                        use std::io::Read;
+                        let mut buf = Vec::new();
+                        let mut reader = s;
+                        let _ = reader.read_to_end(&mut buf);
+                        buf
+                    })
+                    .unwrap_or_default();
+                let stderr = child
+                    .stderr
+                    .take()
+                    .map(|s| {
+                        use std::io::Read;
+                        let mut buf = Vec::new();
+                        let mut reader = s;
+                        let _ = reader.read_to_end(&mut buf);
+                        buf
+                    })
+                    .unwrap_or_default();
 
                 let stdout_str = String::from_utf8_lossy(&stdout);
                 let stderr_str = String::from_utf8_lossy(&stderr);
@@ -99,12 +107,18 @@ impl Tool for ShellTool {
                 // Timeout — kill the process
                 let _ = child.kill();
                 let _ = child.wait();
-                Ok(format!("Command timed out after {} seconds", COMMAND_TIMEOUT_SECS))
+                Ok(format!(
+                    "Command timed out after {} seconds",
+                    COMMAND_TIMEOUT_SECS
+                ))
             }
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                Err(ToolError::ExecutionFailed(format!("Failed to wait for command: {}", e)))
+                Err(ToolError::ExecutionFailed(format!(
+                    "Failed to wait for command: {}",
+                    e
+                )))
             }
         }
     }
@@ -148,7 +162,13 @@ mod tests {
         let result = tool
             .execute(json!({"command": "pwd", "working_dir": "/tmp"}))
             .unwrap();
-        assert!(result.trim().starts_with("/tmp"));
+        // On macOS, /tmp is a symlink to /private/tmp
+        let trimmed = result.trim();
+        assert!(
+            trimmed.starts_with("/tmp") || trimmed.starts_with("/private/tmp"),
+            "unexpected pwd result: {}",
+            trimmed
+        );
     }
 
     #[test]

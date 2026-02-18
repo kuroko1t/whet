@@ -30,13 +30,12 @@ fn create_provider(cfg: &Config, model: &str) -> Box<dyn LlmProvider> {
                 .api_key
                 .clone()
                 .unwrap_or_else(|| std::env::var("ANTHROPIC_API_KEY").unwrap_or_default());
-            let base_url = if cfg.llm.base_url.is_empty()
-                || cfg.llm.base_url == "http://localhost:11434"
-            {
-                "https://api.anthropic.com".to_string()
-            } else {
-                cfg.llm.base_url.clone()
-            };
+            let base_url =
+                if cfg.llm.base_url.is_empty() || cfg.llm.base_url == "http://localhost:11434" {
+                    "https://api.anthropic.com".to_string()
+                } else {
+                    cfg.llm.base_url.clone()
+                };
             Box::new(llm::anthropic::AnthropicClient::new(
                 &base_url, model, api_key,
             ))
@@ -47,16 +46,13 @@ fn create_provider(cfg: &Config, model: &str) -> Box<dyn LlmProvider> {
                 .api_key
                 .clone()
                 .unwrap_or_else(|| std::env::var("GEMINI_API_KEY").unwrap_or_default());
-            let base_url = if cfg.llm.base_url.is_empty()
-                || cfg.llm.base_url == "http://localhost:11434"
-            {
-                "https://generativelanguage.googleapis.com".to_string()
-            } else {
-                cfg.llm.base_url.clone()
-            };
-            Box::new(llm::gemini::GeminiClient::new(
-                &base_url, model, api_key,
-            ))
+            let base_url =
+                if cfg.llm.base_url.is_empty() || cfg.llm.base_url == "http://localhost:11434" {
+                    "https://generativelanguage.googleapis.com".to_string()
+                } else {
+                    cfg.llm.base_url.clone()
+                };
+            Box::new(llm::gemini::GeminiClient::new(&base_url, model, api_key))
         }
         _ => Box::new(llm::ollama::OllamaClient::new(&cfg.llm.base_url, model)),
     }
@@ -208,12 +204,7 @@ fn setup_agent(cfg: &Config, model: &str, skills: &[Skill], yolo: bool) -> Agent
     Agent::new(provider, registry, agent_config, skills)
 }
 
-fn run_chat(
-    model: Option<String>,
-    continue_conv: bool,
-    message: Option<String>,
-    yolo: bool,
-) {
+fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>, yolo: bool) {
     let cfg = Config::load();
     let model = model.unwrap_or(cfg.llm.model.clone());
     let loaded_skills = skills::load_skills(&cfg.agent.skills_dir);
@@ -553,10 +544,7 @@ fn handle_slash_command(
                 "  {} [cmd]   - Run test-fix loop (default: cargo test)",
                 "/test".cyan()
             );
-            println!(
-                "  {}         - List loaded skills",
-                "/skills".cyan()
-            );
+            println!("  {}         - List loaded skills", "/skills".cyan());
             println!(
                 "  {}          - Clear conversation history",
                 "/clear".cyan()

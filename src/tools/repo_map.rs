@@ -132,7 +132,11 @@ fn collect_source_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
 
         if path.is_dir() {
             // Skip symlinks to prevent infinite recursion from cycles
-            if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            if path
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
                 continue;
             }
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {

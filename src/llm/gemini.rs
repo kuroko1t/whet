@@ -271,9 +271,7 @@ impl LlmProvider for GeminiClient {
                 self.model
             )));
         }
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(LlmError::RequestError(
                 "Authentication failed. Check your api_key in config.".to_string(),
             ));
@@ -424,10 +422,7 @@ mod tests {
             "gemini-pro",
             "test-key".into(),
         );
-        assert_eq!(
-            client.base_url,
-            "https://generativelanguage.googleapis.com"
-        );
+        assert_eq!(client.base_url, "https://generativelanguage.googleapis.com");
         assert_eq!(client.model, "gemini-pro");
         assert_eq!(client.api_key, "test-key");
     }
@@ -439,10 +434,7 @@ mod tests {
             "test",
             "key".into(),
         );
-        assert_eq!(
-            client.base_url,
-            "https://generativelanguage.googleapis.com"
-        );
+        assert_eq!(client.base_url, "https://generativelanguage.googleapis.com");
     }
 
     #[test]
@@ -554,9 +546,7 @@ mod tests {
 
     #[test]
     fn test_parse_response_no_candidates() {
-        let resp = GenerateContentResponse {
-            candidates: vec![],
-        };
+        let resp = GenerateContentResponse { candidates: vec![] };
         let result = GeminiClient::parse_response(resp);
         assert!(result.is_err());
     }

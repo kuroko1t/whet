@@ -141,9 +141,7 @@ impl McpClient {
                 match self.reader.fill_buf() {
                     Ok(buf_data) => {
                         if buf_data.is_empty() {
-                            return Err(McpError::IoError(
-                                "Server closed connection".to_string(),
-                            ));
+                            return Err(McpError::IoError("Server closed connection".to_string()));
                         }
                         // Find newline in buffered data
                         let available = buf_data.len();

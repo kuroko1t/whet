@@ -128,7 +128,11 @@ fn search_path(
 
             if entry_path.is_dir() {
                 // Skip symlinks to prevent infinite recursion from cycles
-                if entry_path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                if entry_path
+                    .symlink_metadata()
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {

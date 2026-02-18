@@ -121,8 +121,7 @@ impl Agent {
 
         eprintln!(
             "  {}",
-            "[context compressed: conversation summarized]"
-                .dimmed()
+            "[context compressed: conversation summarized]".dimmed()
         );
     }
 
@@ -607,7 +606,12 @@ mod tests {
             },
         )]);
 
-        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default(), &[]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig::default(),
+            &[],
+        );
 
         let mut received_tokens = Vec::new();
         let response = agent.process_message_with_callback("Hi", &mut |token| {
@@ -629,7 +633,12 @@ mod tests {
             },
         )]);
 
-        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default(), &[]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig::default(),
+            &[],
+        );
         let response = agent.process_message("Hi");
         assert_eq!(response, "token1");
     }
@@ -658,7 +667,12 @@ mod tests {
             ),
         ]);
 
-        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default(), &[]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig::default(),
+            &[],
+        );
 
         let mut received_tokens = Vec::new();
         let response = agent.process_message_with_callback("What project?", &mut |token| {
@@ -703,7 +717,12 @@ mod tests {
             ),
         ]);
 
-        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default(), &[]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig::default(),
+            &[],
+        );
 
         let mut tokens1 = Vec::new();
         let r1 = agent.process_message_with_callback("Q1", &mut |t| tokens1.push(t.to_string()));

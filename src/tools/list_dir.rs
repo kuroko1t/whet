@@ -91,7 +91,8 @@ fn list_entries(
             entries.push(format!("{}/", display));
             if recursive {
                 // Skip symlinks to prevent infinite recursion from cycles
-                let is_symlink = path_buf.symlink_metadata()
+                let is_symlink = path_buf
+                    .symlink_metadata()
                     .map(|m| m.file_type().is_symlink())
                     .unwrap_or(false);
                 if !is_symlink {

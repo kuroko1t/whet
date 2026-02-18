@@ -420,8 +420,11 @@ mod tests {
 
     #[test]
     fn test_client_stores_config() {
-        let client =
-            AnthropicClient::new("https://api.anthropic.com", "claude-3-haiku", "sk-test".into());
+        let client = AnthropicClient::new(
+            "https://api.anthropic.com",
+            "claude-3-haiku",
+            "sk-test".into(),
+        );
         assert_eq!(client.base_url, "https://api.anthropic.com");
         assert_eq!(client.model, "claude-3-haiku");
         assert_eq!(client.api_key, "sk-test");
@@ -429,8 +432,7 @@ mod tests {
 
     #[test]
     fn test_client_trims_trailing_slash() {
-        let client =
-            AnthropicClient::new("https://api.anthropic.com/", "test", "key".into());
+        let client = AnthropicClient::new("https://api.anthropic.com/", "test", "key".into());
         assert_eq!(client.base_url, "https://api.anthropic.com");
     }
 
