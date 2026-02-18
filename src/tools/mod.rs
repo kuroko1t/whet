@@ -12,6 +12,7 @@ pub mod write_file;
 
 use crate::config::ToolRiskLevel;
 use crate::llm::ToolDefinition;
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug)]
@@ -51,51 +52,77 @@ pub trait Tool: Send + Sync {
 }
 
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: HashMap<String, Box<dyn Tool>>,
+    /// Insertion order for deterministic listing
+    order: Vec<String>,
+    /// Cached definitions — built once, reused across iterations
+    cached_defs: Vec<ToolDefinition>,
+    cached_safe_defs: Vec<ToolDefinition>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self {
+            tools: HashMap::new(),
+            order: Vec::new(),
+            cached_defs: Vec::new(),
+            cached_safe_defs: Vec::new(),
+        }
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(tool);
+        let name = tool.name().to_string();
+        self.order.push(name.clone());
+        self.tools.insert(name, tool);
+        // Invalidate caches
+        self.rebuild_caches();
     }
 
+    /// O(1) lookup by name.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools
-            .iter()
-            .find(|t| t.name() == name)
-            .map(|t| t.as_ref())
+        self.tools.get(name).map(|t| t.as_ref())
     }
 
     pub fn list(&self) -> Vec<&dyn Tool> {
-        self.tools.iter().map(|t| t.as_ref()).collect()
+        self.order
+            .iter()
+            .filter_map(|name| self.tools.get(name).map(|t| t.as_ref()))
+            .collect()
     }
 
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+    /// Return cached tool definitions. No allocation on repeated calls.
+    pub fn definitions(&self) -> &[ToolDefinition] {
+        &self.cached_defs
+    }
+
+    /// Return cached safe-only definitions. No allocation on repeated calls.
+    pub fn safe_definitions(&self) -> &[ToolDefinition] {
+        &self.cached_safe_defs
+    }
+
+    fn rebuild_caches(&mut self) {
+        self.cached_defs = self
+            .order
             .iter()
+            .filter_map(|name| self.tools.get(name))
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 parameters: t.parameters_schema(),
             })
-            .collect()
-    }
+            .collect();
 
-    /// Return only definitions for read-only (Safe) tools. Used in plan mode.
-    pub fn safe_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        self.cached_safe_defs = self
+            .order
             .iter()
+            .filter_map(|name| self.tools.get(name))
             .filter(|t| t.risk_level() == ToolRiskLevel::Safe)
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 parameters: t.parameters_schema(),
             })
-            .collect()
+            .collect();
     }
 }
 
@@ -158,7 +185,7 @@ mod tests {
         let registry = default_registry();
         let defs = registry.definitions();
         assert_eq!(defs.len(), 9);
-        for def in &defs {
+        for def in defs {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());
             assert!(def.parameters.is_object());
@@ -271,7 +298,7 @@ mod tests {
         let safe_defs = registry.safe_definitions();
 
         // Should only include Safe tools
-        for def in &safe_defs {
+        for def in safe_defs {
             let tool = registry.get(&def.name).unwrap();
             assert_eq!(
                 tool.risk_level(),

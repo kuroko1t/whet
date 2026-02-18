@@ -90,7 +90,13 @@ fn list_entries(
         if path_buf.is_dir() {
             entries.push(format!("{}/", display));
             if recursive {
-                list_entries(&display, true, entries, depth + 1, truncated)?;
+                // Skip symlinks to prevent infinite recursion from cycles
+                let is_symlink = path_buf.symlink_metadata()
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                if !is_symlink {
+                    list_entries(&display, true, entries, depth + 1, truncated)?;
+                }
             }
         } else {
             entries.push(display);

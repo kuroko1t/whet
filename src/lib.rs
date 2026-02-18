@@ -4,4 +4,5 @@ pub mod llm;
 pub mod mcp;
 pub mod memory;
 pub mod security;
+pub mod skills;
 pub mod tools;

@@ -1,5 +1,17 @@
 use super::{Tool, ToolError};
 use serde_json::json;
+use std::sync::OnceLock;
+
+/// Shared HTTP client for web search operations.
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+    })
+}
 
 pub struct WebSearchTool;
 
@@ -35,17 +47,10 @@ impl Tool for WebSearchTool {
             .ok_or_else(|| ToolError::InvalidArguments("missing 'query' argument".to_string()))?;
         let max_results = args["max_results"].as_u64().unwrap_or(5).min(10) as usize;
 
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to create HTTP client: {}", e))
-            })?;
-
         // Use DuckDuckGo HTML search (no API key required)
         let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
 
-        let response = client
+        let response = http_client()
             .get(&url)
             .header("User-Agent", "hermitclaw/0.1.0")
             .send()
@@ -185,6 +190,9 @@ fn parse_ddg_results(html: &str, max: usize) -> Vec<SearchResult> {
         }
 
         pos = title_end + 1;
+        while pos < html.len() && !html.is_char_boundary(pos) {
+            pos += 1;
+        }
     }
 
     results

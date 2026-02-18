@@ -2,10 +2,13 @@ pub mod prompt;
 
 use crate::config::{PermissionMode, ToolRiskLevel};
 use crate::llm::{LlmProvider, Message};
+use crate::skills::Skill;
 use crate::tools::ToolRegistry;
 use colored::Colorize;
 
 const MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
+const MAX_CONTEXT_MESSAGES: usize = 40;
+const SUMMARIZE_KEEP_RECENT: usize = 10;
 
 pub struct Agent {
     pub llm: Box<dyn LlmProvider>,
@@ -20,6 +23,7 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     pub permission_mode: PermissionMode,
     pub plan_mode: bool,
+    pub context_compression: bool,
 }
 
 impl Default for AgentConfig {
@@ -29,13 +33,19 @@ impl Default for AgentConfig {
             max_iterations: 10,
             permission_mode: PermissionMode::Default,
             plan_mode: false,
+            context_compression: true,
         }
     }
 }
 
 impl Agent {
-    pub fn new(llm: Box<dyn LlmProvider>, tools: ToolRegistry, config: AgentConfig) -> Self {
-        let memory = vec![Message::system(&prompt::system_prompt())];
+    pub fn new(
+        llm: Box<dyn LlmProvider>,
+        tools: ToolRegistry,
+        config: AgentConfig,
+        skills: &[Skill],
+    ) -> Self {
+        let memory = vec![Message::system(&prompt::system_prompt(skills))];
         Self {
             llm,
             tools,
@@ -58,6 +68,64 @@ impl Agent {
         self.process_message_with_callbacks(user_input, on_token, &mut |_, _| true)
     }
 
+    /// Compress context by summarizing old messages when the memory exceeds the threshold.
+    fn compress_context(&mut self) {
+        if self.memory.len() <= MAX_CONTEXT_MESSAGES {
+            return;
+        }
+
+        // Split: [system_prompt] + [old_messages] + [recent_messages]
+        // Keep system prompt (index 0) and the last SUMMARIZE_KEEP_RECENT messages
+        let keep_from = self.memory.len() - SUMMARIZE_KEEP_RECENT;
+
+        if keep_from <= 1 {
+            return;
+        }
+
+        // Build summarization request by draining old messages (avoids cloning)
+        // First, split off the recent messages
+        let recent_messages = self.memory.split_off(keep_from);
+        // Now self.memory = [system_prompt, old_messages...]
+        // Drain old messages, keeping system_prompt at index 0
+        let system_prompt = self.memory[0].clone();
+        // Use the remaining messages (including system prompt) as summarization input
+        self.memory.push(Message::user(
+            "Summarize the conversation so far concisely, preserving key facts, decisions, and context needed for future turns:",
+        ));
+
+        // Call LLM without tools for summarization
+        let summary = match self.llm.chat(&self.memory, &[]) {
+            Ok(resp) => resp.content.unwrap_or_default(),
+            Err(_) => {
+                // Restore memory on error
+                self.memory.pop(); // remove summarize request
+                self.memory.extend(recent_messages);
+                return;
+            }
+        };
+
+        if summary.is_empty() {
+            self.memory.pop();
+            self.memory.extend(recent_messages);
+            return;
+        }
+
+        // Rebuild memory: [system_prompt, summary, recent_messages...]
+        self.memory.clear();
+        self.memory.push(system_prompt);
+        self.memory.push(Message::system(&format!(
+            "Previous conversation summary: {}",
+            summary
+        )));
+        self.memory.extend(recent_messages);
+
+        eprintln!(
+            "  {}",
+            "[context compressed: conversation summarized]"
+                .dimmed()
+        );
+    }
+
     /// Process a message with streaming callback and approval callback.
     /// `on_approve` is called before executing a tool that requires approval.
     /// It receives (tool_name, &arguments) and returns true to allow, false to deny.
@@ -69,15 +137,19 @@ impl Agent {
     ) -> String {
         self.memory.push(Message::user(user_input));
 
+        // Compress context if enabled and threshold exceeded
+        if self.config.context_compression {
+            self.compress_context();
+        }
+
         let tool_defs = if self.config.plan_mode {
-            // In plan mode, only expose read-only (Safe) tools
             self.tools.safe_definitions()
         } else {
             self.tools.definitions()
         };
 
         for _iteration in 0..self.config.max_iterations {
-            let response = match self.llm.chat_streaming(&self.memory, &tool_defs, on_token) {
+            let response = match self.llm.chat_streaming(&self.memory, tool_defs, on_token) {
                 Ok(resp) => resp,
                 Err(e) => return format!("Error: {}", e),
             };
@@ -89,12 +161,15 @@ impl Agent {
                 return content;
             }
 
-            // Process tool calls
-            self.memory.push(Message::assistant_with_tool_calls(
-                response.tool_calls.clone(),
-            ));
+            // Separate content from tool calls to avoid borrow issues
+            let response_content = response.content;
+            let tool_calls = response.tool_calls;
 
-            for tool_call in &response.tool_calls {
+            // Store tool calls in memory — move instead of clone
+            self.memory
+                .push(Message::assistant_with_tool_calls(tool_calls.clone()));
+
+            for tool_call in &tool_calls {
                 eprintln!(
                     "  {} {}",
                     format!("[tool: {}]", tool_call.name).cyan(),
@@ -126,7 +201,12 @@ impl Agent {
                 };
 
                 let result = if result.len() > MAX_TOOL_OUTPUT_CHARS {
-                    let mut truncated = result[..MAX_TOOL_OUTPUT_CHARS].to_string();
+                    let mut end = MAX_TOOL_OUTPUT_CHARS;
+                    while !result.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    let mut truncated = String::with_capacity(end + 40);
+                    truncated.push_str(&result[..end]);
                     truncated.push_str("\n...[output truncated to 50KB]");
                     truncated
                 } else {
@@ -138,7 +218,7 @@ impl Agent {
             }
 
             // If the LLM also returned content alongside tool calls, include it
-            if let Some(content) = &response.content {
+            if let Some(content) = &response_content {
                 if !content.is_empty() {
                     self.memory.push(Message::assistant(content));
                 }
@@ -218,7 +298,7 @@ mod tests {
     }
 
     fn make_agent(llm: Box<dyn LlmProvider>) -> Agent {
-        Agent::new(llm, default_registry(), AgentConfig::default())
+        Agent::new(llm, default_registry(), AgentConfig::default(), &[])
     }
 
     #[test]
@@ -387,7 +467,7 @@ mod tests {
             max_iterations: 3,
             ..AgentConfig::default()
         };
-        let mut agent = Agent::new(Box::new(llm), default_registry(), config);
+        let mut agent = Agent::new(Box::new(llm), default_registry(), config, &[]);
         let response = agent.process_message("Keep using tools forever");
         assert_eq!(
             response,
@@ -527,7 +607,7 @@ mod tests {
             },
         )]);
 
-        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default());
+        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default(), &[]);
 
         let mut received_tokens = Vec::new();
         let response = agent.process_message_with_callback("Hi", &mut |token| {
@@ -549,7 +629,7 @@ mod tests {
             },
         )]);
 
-        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default());
+        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default(), &[]);
         let response = agent.process_message("Hi");
         assert_eq!(response, "token1");
     }
@@ -578,7 +658,7 @@ mod tests {
             ),
         ]);
 
-        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default());
+        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default(), &[]);
 
         let mut received_tokens = Vec::new();
         let response = agent.process_message_with_callback("What project?", &mut |token| {
@@ -623,7 +703,7 @@ mod tests {
             ),
         ]);
 
-        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default());
+        let mut agent = Agent::new(Box::new(llm), default_registry(), AgentConfig::default(), &[]);
 
         let mut tokens1 = Vec::new();
         let r1 = agent.process_message_with_callback("Q1", &mut |t| tokens1.push(t.to_string()));
@@ -670,6 +750,7 @@ mod tests {
                 permission_mode: mode,
                 ..AgentConfig::default()
             },
+            &[],
         )
     }
 
@@ -899,6 +980,7 @@ mod tests {
                 plan_mode: true,
                 ..AgentConfig::default()
             },
+            &[],
         );
 
         let response = agent.process_message("Delete everything");
@@ -936,6 +1018,7 @@ mod tests {
                 plan_mode: true,
                 ..AgentConfig::default()
             },
+            &[],
         );
 
         let response = agent.process_message("Write file");
@@ -973,6 +1056,7 @@ mod tests {
                 plan_mode: true,
                 ..AgentConfig::default()
             },
+            &[],
         );
 
         let response = agent.process_message("Read Cargo.toml");

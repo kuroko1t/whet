@@ -1,5 +1,7 @@
-pub fn system_prompt() -> String {
-    "You are hermitclaw, a fully offline AI assistant. You run entirely on the user's local machine with no internet connection. Use the available tools when needed to help the user. Be concise and helpful.
+use crate::skills::Skill;
+
+pub fn system_prompt(skills: &[Skill]) -> String {
+    let mut prompt = "You are hermitclaw, a fully offline AI assistant. You run entirely on the user's local machine with no internet connection. Use the available tools when needed to help the user. Be concise and helpful.
 
 Available tools:
 - read_file: Read the contents of a file
@@ -14,5 +16,14 @@ Available tools:
 
 When web tools are available:
 - web_fetch: Fetch the text contents of a URL
-- web_search: Search the web for information".to_string()
+- web_search: Search the web for information".to_string();
+
+    if !skills.is_empty() {
+        prompt.push_str("\n\n## Skills\n");
+        for skill in skills {
+            prompt.push_str(&format!("\n### {}\n{}\n", skill.name, skill.content));
+        }
+    }
+
+    prompt
 }

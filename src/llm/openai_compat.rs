@@ -268,7 +268,7 @@ impl LlmProvider for OpenAiCompatClient {
         }
 
         let reader = std::io::BufReader::new(response);
-        let mut accumulated_content = String::new();
+        let mut accumulated_content = String::with_capacity(1024);
         // Track tool calls by index for incremental assembly
         let mut tool_call_map: std::collections::HashMap<usize, (String, String, String)> =
             std::collections::HashMap::new();
@@ -278,14 +278,14 @@ impl LlmProvider for OpenAiCompatClient {
             let line = line_result
                 .map_err(|e| LlmError::ParseError(format!("Failed to read stream: {}", e)))?;
 
-            let line = line.trim().to_string();
+            let trimmed = line.trim();
 
             // SSE format: "data: {...}" or "data: [DONE]"
-            if !line.starts_with("data: ") {
+            if !trimmed.starts_with("data: ") {
                 continue;
             }
 
-            let data = &line[6..];
+            let data = &trimmed[6..];
             if data == "[DONE]" {
                 break;
             }
@@ -346,7 +346,15 @@ impl LlmProvider for OpenAiCompatClient {
                 }
             })
             .collect();
-        tool_calls.sort_by(|a, b| a.id.cmp(&b.id));
+        tool_calls.sort_by(|a, b| {
+            // Extract numeric suffix for natural ordering (e.g., "call_2" < "call_10")
+            let num_a = a.id.rsplit('_').next().and_then(|s| s.parse::<u64>().ok());
+            let num_b = b.id.rsplit('_').next().and_then(|s| s.parse::<u64>().ok());
+            match (num_a, num_b) {
+                (Some(na), Some(nb)) => na.cmp(&nb),
+                _ => a.id.cmp(&b.id),
+            }
+        });
 
         let content = if accumulated_content.is_empty() {
             None

@@ -116,21 +116,54 @@ impl McpClient {
             .flush()
             .map_err(|e| McpError::IoError(format!("Flush failed: {}", e)))?;
 
-        // Read response lines until we get one with matching id
+        // Read response lines until we get one with matching id.
+        // Use a thread to enforce the timeout since read_line blocks.
         let start = Instant::now();
+        const MAX_LINE_BYTES: usize = 10 * 1024 * 1024; // 10 MB per-line limit
         loop {
             if start.elapsed() > RESPONSE_TIMEOUT {
                 return Err(McpError::IoError("Server response timeout".to_string()));
             }
 
             let mut line = String::new();
-            let bytes_read = self
-                .reader
-                .read_line(&mut line)
-                .map_err(|e| McpError::IoError(format!("Read failed: {}", e)))?;
 
-            if bytes_read == 0 {
-                return Err(McpError::IoError("Server closed connection".to_string()));
+            // Use fill_buf to check data availability without blocking indefinitely.
+            loop {
+                if start.elapsed() > RESPONSE_TIMEOUT {
+                    return Err(McpError::IoError("Server response timeout".to_string()));
+                }
+                if line.len() > MAX_LINE_BYTES {
+                    return Err(McpError::IoError(
+                        "Server sent excessively long line".to_string(),
+                    ));
+                }
+                // Use the buffered reader's fill_buf to check data availability
+                match self.reader.fill_buf() {
+                    Ok(buf_data) => {
+                        if buf_data.is_empty() {
+                            return Err(McpError::IoError(
+                                "Server closed connection".to_string(),
+                            ));
+                        }
+                        // Find newline in buffered data
+                        let available = buf_data.len();
+                        if let Some(nl_pos) = buf_data.iter().position(|&b| b == b'\n') {
+                            // Found newline — take up to and including it
+                            let chunk = &buf_data[..=nl_pos];
+                            line.push_str(&String::from_utf8_lossy(chunk));
+                            self.reader.consume(nl_pos + 1);
+                            break; // Line complete
+                        } else {
+                            // No newline yet — consume all buffered data and continue
+                            line.push_str(&String::from_utf8_lossy(&buf_data[..available]));
+                            self.reader.consume(available);
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        return Err(McpError::IoError(format!("Read failed: {}", e)));
+                    }
+                }
             }
 
             let line = line.trim();

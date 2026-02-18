@@ -62,6 +62,18 @@ pub struct AgentConfig {
     pub permission_mode: PermissionMode,
     #[serde(default)]
     pub web_enabled: bool,
+    #[serde(default = "default_context_compression")]
+    pub context_compression: bool,
+    #[serde(default = "default_skills_dir")]
+    pub skills_dir: String,
+}
+
+fn default_context_compression() -> bool {
+    true
+}
+
+fn default_skills_dir() -> String {
+    "~/.hermitclaw/skills".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -97,6 +109,8 @@ impl Default for Config {
                 max_iterations: 10,
                 permission_mode: PermissionMode::Default,
                 web_enabled: false,
+                context_compression: true,
+                skills_dir: "~/.hermitclaw/skills".to_string(),
             },
             memory: MemoryConfig {
                 database_path: "~/.hermitclaw/memory.db".to_string(),

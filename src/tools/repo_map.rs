@@ -131,6 +131,10 @@ fn collect_source_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
         let path = entry.path();
 
         if path.is_dir() {
+            // Skip symlinks to prevent infinite recursion from cycles
+            if path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                continue;
+            }
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if SKIP_DIRS.contains(&name) {
                     continue;
@@ -375,7 +379,11 @@ fn extract_signature(line: &str) -> String {
 
     // Limit length
     if sig.len() > 120 {
-        format!("{}...", &sig[..117])
+        let mut end = 117;
+        while !sig.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &sig[..end])
     } else {
         sig.to_string()
     }

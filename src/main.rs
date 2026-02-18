@@ -7,12 +7,14 @@ mod llm;
 mod mcp;
 mod memory;
 mod security;
+mod skills;
 mod tools;
 
 use agent::{Agent, AgentConfig};
 use config::Config;
 use llm::LlmProvider;
 use memory::store::MemoryStore;
+use skills::Skill;
 use tools::default_registry;
 
 fn create_provider(cfg: &Config, model: &str) -> Box<dyn LlmProvider> {
@@ -22,6 +24,40 @@ fn create_provider(cfg: &Config, model: &str) -> Box<dyn LlmProvider> {
             model,
             cfg.llm.api_key.clone(),
         )),
+        "anthropic" => {
+            let api_key = cfg
+                .llm
+                .api_key
+                .clone()
+                .unwrap_or_else(|| std::env::var("ANTHROPIC_API_KEY").unwrap_or_default());
+            let base_url = if cfg.llm.base_url.is_empty()
+                || cfg.llm.base_url == "http://localhost:11434"
+            {
+                "https://api.anthropic.com".to_string()
+            } else {
+                cfg.llm.base_url.clone()
+            };
+            Box::new(llm::anthropic::AnthropicClient::new(
+                &base_url, model, api_key,
+            ))
+        }
+        "gemini" => {
+            let api_key = cfg
+                .llm
+                .api_key
+                .clone()
+                .unwrap_or_else(|| std::env::var("GEMINI_API_KEY").unwrap_or_default());
+            let base_url = if cfg.llm.base_url.is_empty()
+                || cfg.llm.base_url == "http://localhost:11434"
+            {
+                "https://generativelanguage.googleapis.com".to_string()
+            } else {
+                cfg.llm.base_url.clone()
+            };
+            Box::new(llm::gemini::GeminiClient::new(
+                &base_url, model, api_key,
+            ))
+        }
         _ => Box::new(llm::ollama::OllamaClient::new(&cfg.llm.base_url, model)),
     }
 }
@@ -47,6 +83,12 @@ enum Commands {
         /// Force a new conversation (default)
         #[arg(long)]
         new: bool,
+        /// Single-shot mode: send a message and exit
+        #[arg(short = 'p', long = "prompt")]
+        message: Option<String>,
+        /// Skip all permission prompts (yolo mode)
+        #[arg(short = 'y', long = "yolo")]
+        yolo: bool,
     },
     /// List available tools
     Tools,
@@ -80,7 +122,11 @@ fn ask_approval(tool_name: &str, args: &serde_json::Value) -> bool {
             }
             if let Some(old) = args["old_text"].as_str() {
                 let preview = if old.len() > 80 {
-                    format!("{}...", &old[..80])
+                    let mut end = 80;
+                    while !old.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &old[..end])
                 } else {
                     old.to_string()
                 };
@@ -88,7 +134,11 @@ fn ask_approval(tool_name: &str, args: &serde_json::Value) -> bool {
             }
             if let Some(new) = args["new_text"].as_str() {
                 let preview = if new.len() > 80 {
-                    format!("{}...", &new[..80])
+                    let mut end = 80;
+                    while !new.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &new[..end])
                 } else {
                     new.to_string()
                 };
@@ -127,41 +177,98 @@ fn ask_approval(tool_name: &str, args: &serde_json::Value) -> bool {
     }
 }
 
-fn run_chat(model: Option<String>, continue_conv: bool) {
-    let cfg = Config::load();
-
-    let model = model.unwrap_or(cfg.llm.model.clone());
-
-    println!("{}", "hermitclaw v0.1.0".bold());
-    println!("The hermit needs no network.\n");
-    println!("Model: {}", model.green());
-    println!(
-        "Permission: {}",
-        cfg.agent.permission_mode.to_string().cyan()
-    );
-    println!("Type {} to exit.\n", "Ctrl+D".dimmed());
-
-    let provider = create_provider(&cfg, &model);
+fn setup_agent(cfg: &Config, model: &str, skills: &[Skill], yolo: bool) -> Agent {
+    let provider = create_provider(cfg, model);
     let mut registry = default_registry();
 
     // Register web tools if enabled
     if cfg.agent.web_enabled {
         tools::register_web_tools(&mut registry);
-        println!("Web tools: {}", "enabled".green());
     }
 
     // Register MCP tools
     if !cfg.mcp.servers.is_empty() {
         mcp::register_mcp_tools(&mut registry, &cfg.mcp.servers);
     }
-    let agent_config = AgentConfig {
-        model: model.clone(),
-        max_iterations: cfg.agent.max_iterations,
-        permission_mode: cfg.agent.permission_mode.clone(),
-        plan_mode: false,
+
+    let permission_mode = if yolo {
+        config::PermissionMode::Yolo
+    } else {
+        cfg.agent.permission_mode.clone()
     };
 
-    let mut agent = Agent::new(provider, registry, agent_config);
+    let agent_config = AgentConfig {
+        model: model.to_string(),
+        max_iterations: cfg.agent.max_iterations,
+        permission_mode,
+        plan_mode: false,
+        context_compression: cfg.agent.context_compression,
+    };
+
+    Agent::new(provider, registry, agent_config, skills)
+}
+
+fn run_chat(
+    model: Option<String>,
+    continue_conv: bool,
+    message: Option<String>,
+    yolo: bool,
+) {
+    let cfg = Config::load();
+    let model = model.unwrap_or(cfg.llm.model.clone());
+    let loaded_skills = skills::load_skills(&cfg.agent.skills_dir);
+
+    // Single-shot mode
+    if let Some(msg) = message {
+        let mut agent = setup_agent(&cfg, &model, &loaded_skills, yolo);
+
+        let response = agent.process_message_with_callbacks(
+            &msg,
+            &mut |token| {
+                print!("{}", token);
+            },
+            &mut |_, _| yolo, // In single-shot without -y, deny by default
+        );
+
+        // If non-streaming, print the full response
+        if !cfg.llm.streaming {
+            println!("{}", response);
+        } else {
+            println!();
+        }
+        return;
+    }
+
+    // Interactive mode
+    println!("{}", "hermitclaw v0.1.0".bold());
+    println!("The hermit needs no network.\n");
+    println!("Model: {}", model.green());
+    println!(
+        "Permission: {}",
+        if yolo {
+            "yolo".yellow().to_string()
+        } else {
+            cfg.agent.permission_mode.to_string().cyan().to_string()
+        }
+    );
+    if !loaded_skills.is_empty() {
+        println!(
+            "Skills: {}",
+            loaded_skills
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+                .cyan()
+        );
+    }
+    println!("Type {} to exit.\n", "Ctrl+D".dimmed());
+
+    let mut agent = setup_agent(&cfg, &model, &loaded_skills, yolo);
+
+    if cfg.agent.web_enabled {
+        println!("Web tools: {}", "enabled".green());
+    }
 
     // Memory store
     let store = match MemoryStore::new(&cfg.memory.database_path) {
@@ -248,7 +355,13 @@ fn run_chat(model: Option<String>, continue_conv: bool) {
 
                 // Handle slash commands
                 if input.starts_with('/') {
-                    match handle_slash_command(input, &cfg, &mut agent, &mut current_model) {
+                    match handle_slash_command(
+                        input,
+                        &cfg,
+                        &mut agent,
+                        &mut current_model,
+                        &loaded_skills,
+                    ) {
                         SlashResult::Handled => continue,
                         SlashResult::NewProvider(provider) => {
                             agent.llm = provider;
@@ -328,6 +441,7 @@ fn handle_slash_command(
     cfg: &Config,
     agent: &mut Agent,
     current_model: &mut String,
+    skills: &[Skill],
 ) -> SlashResult {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
     let cmd = parts[0];
@@ -400,6 +514,30 @@ fn handle_slash_command(
             }
             SlashResult::Handled
         }
+        "/skills" => {
+            if skills.is_empty() {
+                println!("No skills loaded.");
+                println!(
+                    "Place .md files in {} to add skills.",
+                    cfg.agent.skills_dir.cyan()
+                );
+            } else {
+                println!("{}", "Loaded skills:".bold());
+                for skill in skills {
+                    let preview = if skill.content.len() > 80 {
+                        let mut end = 80;
+                        while !skill.content.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &skill.content[..end])
+                    } else {
+                        skill.content.clone()
+                    };
+                    println!("  {} - {}", skill.name.cyan(), preview.dimmed());
+                }
+            }
+            SlashResult::Handled
+        }
         "/help" => {
             println!("{}", "Available commands:".bold());
             println!("  {} <name>  - Switch LLM model", "/model".cyan());
@@ -414,6 +552,10 @@ fn handle_slash_command(
             println!(
                 "  {} [cmd]   - Run test-fix loop (default: cargo test)",
                 "/test".cyan()
+            );
+            println!(
+                "  {}         - List loaded skills",
+                "/skills".cyan()
             );
             println!(
                 "  {}          - Clear conversation history",
@@ -432,7 +574,7 @@ fn handle_slash_command(
             agent.memory.clear();
             agent
                 .memory
-                .push(llm::Message::system(&agent::prompt::system_prompt()));
+                .push(llm::Message::system(&agent::prompt::system_prompt(skills)));
             println!("{}", "Conversation cleared.".green());
             SlashResult::Handled
         }
@@ -484,10 +626,11 @@ fn run_test_fix_loop(agent: &mut Agent, test_cmd: &str, cfg: &Config) {
         // Truncate output if too long
         let max_output = 4000;
         let failure_output = if combined.len() > max_output {
-            format!(
-                "...(truncated)\n{}",
-                &combined[combined.len() - max_output..]
-            )
+            let mut start = combined.len() - max_output;
+            while !combined.is_char_boundary(start) {
+                start += 1;
+            }
+            format!("...(truncated)\n{}", &combined[start..])
         } else {
             combined.to_string()
         };
@@ -541,8 +684,10 @@ fn main() {
             model,
             r#continue,
             new: _,
+            message,
+            yolo,
         } => {
-            run_chat(model, r#continue);
+            run_chat(model, r#continue, message, yolo);
         }
         Commands::Tools => {
             let cfg = Config::load();

@@ -1,5 +1,17 @@
 use super::{Tool, ToolError};
 use serde_json::json;
+use std::sync::OnceLock;
+
+/// Shared HTTP client for web fetch operations — created once, reused across all calls.
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+    })
+}
 
 pub struct WebFetchTool;
 
@@ -37,14 +49,7 @@ impl Tool for WebFetchTool {
             ));
         }
 
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to create HTTP client: {}", e))
-            })?;
-
-        let response = client
+        let response = http_client()
             .get(url)
             .header("User-Agent", "hermitclaw/0.1.0")
             .send()
@@ -82,9 +87,13 @@ impl Tool for WebFetchTool {
         // Truncate if too large
         let max_len = 50_000;
         if text.len() > max_len {
+            let mut end = max_len;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
             Ok(format!(
                 "{}\n\n... (truncated, {} total chars)",
-                &text[..max_len],
+                &text[..end],
                 text.len()
             ))
         } else {
@@ -94,23 +103,20 @@ impl Tool for WebFetchTool {
 }
 
 /// Simple HTML to text extraction — strips tags and decodes basic entities.
+/// Uses char_indices() for safe UTF-8 handling.
 fn html_to_text(html: &str) -> String {
-    let mut text = String::new();
+    let mut text = String::with_capacity(html.len() / 3);
     let mut in_tag = false;
     let mut in_script = false;
     let mut in_style = false;
-    let mut tag_name = String::new();
+    let mut tag_name = String::with_capacity(16);
 
-    let chars: Vec<char> = html.chars().collect();
-    let mut i = 0;
+    let mut chars = html.char_indices().peekable();
 
-    while i < chars.len() {
-        let ch = chars[i];
-
+    while let Some((i, ch)) = chars.next() {
         if ch == '<' {
             in_tag = true;
             tag_name.clear();
-            i += 1;
             continue;
         }
 
@@ -118,79 +124,66 @@ fn html_to_text(html: &str) -> String {
             if ch == '>' {
                 in_tag = false;
                 let lower = tag_name.to_lowercase();
-                if lower == "script" {
-                    in_script = true;
-                } else if lower == "/script" {
-                    in_script = false;
-                } else if lower == "style" {
-                    in_style = true;
-                } else if lower == "/style" {
-                    in_style = false;
-                } else if lower == "br"
-                    || lower == "br/"
-                    || lower.starts_with("br ")
-                    || lower == "p"
-                    || lower == "/p"
-                    || lower == "div"
-                    || lower == "/div"
-                    || lower == "h1"
-                    || lower == "/h1"
-                    || lower == "h2"
-                    || lower == "/h2"
-                    || lower == "h3"
-                    || lower == "/h3"
-                    || lower == "li"
-                    || lower == "tr"
-                    || lower == "/tr"
-                {
-                    text.push('\n');
+                match lower.as_str() {
+                    "script" => in_script = true,
+                    "/script" => in_script = false,
+                    "style" => in_style = true,
+                    "/style" => in_style = false,
+                    "br" | "br/" | "p" | "/p" | "div" | "/div" | "h1" | "/h1" | "h2" | "/h2"
+                    | "h3" | "/h3" | "li" | "tr" | "/tr" => {
+                        text.push('\n');
+                    }
+                    s if s.starts_with("br ") => {
+                        text.push('\n');
+                    }
+                    _ => {}
                 }
             } else {
                 tag_name.push(ch);
             }
-            i += 1;
             continue;
         }
 
         if in_script || in_style {
-            i += 1;
             continue;
         }
 
         // Handle HTML entities
         if ch == '&' {
-            let rest: String = chars[i..].iter().take(10).collect();
-            if rest.starts_with("&amp;") {
+            let remaining = &html[i..];
+            if remaining.starts_with("&amp;") {
                 text.push('&');
-                i += 5;
-            } else if rest.starts_with("&lt;") {
+                // Skip the remaining 4 chars of "&amp;"
+                for _ in 0..4 { chars.next(); }
+            } else if remaining.starts_with("&lt;") {
                 text.push('<');
-                i += 4;
-            } else if rest.starts_with("&gt;") {
+                for _ in 0..3 { chars.next(); }
+            } else if remaining.starts_with("&gt;") {
                 text.push('>');
-                i += 4;
-            } else if rest.starts_with("&quot;") {
+                for _ in 0..3 { chars.next(); }
+            } else if remaining.starts_with("&quot;") {
                 text.push('"');
-                i += 6;
-            } else if rest.starts_with("&#39;") || rest.starts_with("&apos;") {
+                for _ in 0..5 { chars.next(); }
+            } else if remaining.starts_with("&#39;") {
                 text.push('\'');
-                i += if rest.starts_with("&#39;") { 5 } else { 6 };
-            } else if rest.starts_with("&nbsp;") {
+                for _ in 0..4 { chars.next(); }
+            } else if remaining.starts_with("&apos;") {
+                text.push('\'');
+                for _ in 0..5 { chars.next(); }
+            } else if remaining.starts_with("&nbsp;") {
                 text.push(' ');
-                i += 6;
+                for _ in 0..5 { chars.next(); }
             } else {
                 text.push('&');
-                i += 1;
             }
             continue;
         }
 
         text.push(ch);
-        i += 1;
     }
 
-    // Clean up multiple blank lines
-    let mut result = String::new();
+    // Clean up multiple blank lines — single pass
+    let mut result = String::with_capacity(text.len());
     let mut prev_blank = false;
     for line in text.lines() {
         let trimmed = line.trim();
@@ -206,7 +199,8 @@ fn html_to_text(html: &str) -> String {
         }
     }
 
-    result.trim().to_string()
+    result.truncate(result.trim_end().len());
+    result
 }
 
 #[cfg(test)]

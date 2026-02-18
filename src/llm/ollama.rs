@@ -231,7 +231,7 @@ impl LlmProvider for OllamaClient {
         }
 
         let reader = std::io::BufReader::new(response);
-        let mut accumulated_content = String::new();
+        let mut accumulated_content = String::with_capacity(1024);
         let mut tool_calls = Vec::new();
 
         use std::io::BufRead;
