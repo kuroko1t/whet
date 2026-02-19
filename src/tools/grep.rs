@@ -413,4 +413,140 @@ mod tests {
     fn test_is_binary_nonexistent_file() {
         assert!(!is_binary(Path::new("/nonexistent_file_xyz")));
     }
+
+    #[test]
+    fn test_grep_empty_pattern() {
+        // Empty pattern should match every line
+        let path = "/tmp/whet_test_grep_empty_pat.txt";
+        fs::write(path, "line1\nline2\n").unwrap();
+
+        let tool = GrepTool;
+        let result = tool.execute(json!({"pattern": "", "path": path})).unwrap();
+        // Empty pattern matches all lines
+        assert!(result.contains("line1"));
+        assert!(result.contains("line2"));
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_grep_unicode_pattern() {
+        let path = "/tmp/whet_test_grep_unicode.txt";
+        fs::write(path, "日本語テスト\nRust言語\n普通の行\n").unwrap();
+
+        let tool = GrepTool;
+        let result = tool
+            .execute(json!({"pattern": "言語", "path": path}))
+            .unwrap();
+        assert!(result.contains("Rust言語"));
+        assert!(result.contains(":2:"));
+        assert_eq!(result.lines().count(), 1);
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_grep_special_regex_chars_treated_literally() {
+        let path = "/tmp/whet_test_grep_special.txt";
+        fs::write(path, "func(a, b)\nfunc.call()\n2+2=4\n").unwrap();
+
+        let tool = GrepTool;
+        // The grep uses contains(), not regex, so special chars are literal
+        let result = tool
+            .execute(json!({"pattern": "2+2=4", "path": path}))
+            .unwrap();
+        assert!(result.contains("2+2=4"));
+        assert_eq!(result.lines().count(), 1);
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_is_binary_null_at_start() {
+        let path = "/tmp/whet_test_binary_start.bin";
+        let mut data = vec![0u8]; // NULL as first byte
+        data.extend_from_slice(b"text after null");
+        fs::write(path, &data).unwrap();
+        assert!(is_binary(Path::new(path)));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_is_binary_null_after_check_boundary() {
+        // File with null byte AFTER BINARY_CHECK_SIZE should NOT be detected as binary
+        let path = "/tmp/whet_test_binary_boundary.bin";
+        let mut data = vec![b'a'; BINARY_CHECK_SIZE + 100];
+        data[BINARY_CHECK_SIZE + 50] = 0; // NULL after boundary
+        fs::write(path, &data).unwrap();
+        assert!(
+            !is_binary(Path::new(path)),
+            "NULL after BINARY_CHECK_SIZE should not be detected"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_grep_file_exactly_at_size_limit() {
+        let dir = "/tmp/whet_test_grep_boundary";
+        fs::create_dir_all(dir).ok();
+        let path = format!("{}/exact.txt", dir);
+        // Create file exactly at MAX_FILE_SIZE
+        let content = "findme\n".repeat(MAX_FILE_SIZE as usize / 7);
+        fs::write(&path, &content).unwrap();
+
+        let meta = fs::metadata(&path).unwrap();
+        let tool = GrepTool;
+        if meta.len() <= MAX_FILE_SIZE {
+            // Should be searched
+            let result = tool
+                .execute(json!({"pattern": "findme", "path": &path}))
+                .unwrap();
+            assert!(result.contains("findme"));
+        } else {
+            // Just over, should be skipped
+            let result = tool
+                .execute(json!({"pattern": "findme", "path": &path}))
+                .unwrap();
+            assert_eq!(result, "No matches found.");
+        }
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_grep_line_numbers_start_at_one() {
+        let path = "/tmp/whet_test_grep_linenum.txt";
+        fs::write(path, "first\nsecond\nthird\n").unwrap();
+
+        let tool = GrepTool;
+        let result = tool
+            .execute(json!({"pattern": "first", "path": path}))
+            .unwrap();
+        assert!(result.contains(":1:"), "First line should be :1: not :0:");
+
+        let result = tool
+            .execute(json!({"pattern": "third", "path": path}))
+            .unwrap();
+        assert!(result.contains(":3:"));
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_grep_skips_target_directory() {
+        let tool = GrepTool;
+        let result = tool
+            .execute(json!({"pattern": "whet", "path": "."}))
+            .unwrap();
+        // Check that no file path (the part before the first ':') is under target/
+        for line in result.lines() {
+            if let Some(file_path) = line.split(':').next() {
+                assert!(
+                    !file_path.starts_with("target/") && !file_path.starts_with("./target/"),
+                    "Should skip target directory, found file: {}",
+                    file_path
+                );
+            }
+        }
+    }
 }

@@ -522,4 +522,82 @@ mod tests {
     fn test_git_remote_accepted() {
         assert!(APPROVAL_COMMANDS.contains(&"remote"));
     }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn test_git_empty_output_shows_no_output() {
+        let tool = GitTool;
+        // `git diff` with no changes produces empty output
+        // Use a known-clean state by diffing HEAD with itself
+        let result = tool
+            .execute(json!({"command": "diff", "args": "HEAD HEAD"}))
+            .unwrap();
+        assert_eq!(result, "(no output)");
+    }
+
+    #[test]
+    fn test_shell_split_unclosed_single_quote() {
+        // Unclosed quote should include remaining text as one token
+        let args = shell_split("-m 'unclosed message");
+        assert_eq!(args, vec!["-m", "unclosed message"]);
+    }
+
+    #[test]
+    fn test_shell_split_unclosed_double_quote() {
+        let args = shell_split("-m \"unclosed message");
+        assert_eq!(args, vec!["-m", "unclosed message"]);
+    }
+
+    #[test]
+    fn test_shell_split_tab_separator() {
+        let args = shell_split("-m\t'message'");
+        assert_eq!(args, vec!["-m", "message"]);
+    }
+
+    #[test]
+    fn test_shell_split_only_whitespace() {
+        let args = shell_split("   \t  ");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_git_push_force_with_lease_blocked() {
+        let tool = GitTool;
+        let result = tool.execute(json!({"command": "push", "args": "--force-with-lease"}));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
+    }
+
+    #[test]
+    fn test_git_risk_level_unknown_command() {
+        // Unknown commands default to Moderate
+        assert_eq!(git_command_risk_level("bisect"), ToolRiskLevel::Moderate);
+        assert_eq!(git_command_risk_level(""), ToolRiskLevel::Moderate);
+    }
+
+    #[test]
+    fn test_git_commit_with_long_form_m_flag() {
+        let tool = GitTool;
+        // --message should NOT be accepted (only -m and -m* are checked)
+        let result = tool.execute(json!({"command": "commit", "args": "--message 'test'"}));
+        // The current code checks for -m or starts_with("-m"), so --message won't match
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("-m flag"));
+    }
+
+    #[test]
+    fn test_git_reset_hard_with_extra_args() {
+        let tool = GitTool;
+        let result = tool.execute(json!({"command": "reset", "args": "--hard --quiet HEAD~1"}));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
+    }
 }

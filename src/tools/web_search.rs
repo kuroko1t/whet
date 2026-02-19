@@ -309,4 +309,101 @@ mod tests {
         let results = parse_ddg_results(html, 5);
         assert!(results.is_empty());
     }
+
+    #[test]
+    fn test_urlencoding_special_chars() {
+        assert_eq!(urlencoding("a=b"), "a%3Db");
+        assert_eq!(urlencoding("a/b"), "a%2Fb");
+        assert_eq!(urlencoding("a?b"), "a%3Fb");
+        assert_eq!(urlencoding("a#b"), "a%23b");
+    }
+
+    #[test]
+    fn test_urlencoding_unicode() {
+        let encoded = urlencoding("日本語");
+        assert!(!encoded.contains("日"));
+        assert!(encoded.contains("%"));
+    }
+
+    #[test]
+    fn test_urlencoding_safe_chars_pass_through() {
+        assert_eq!(urlencoding("abc-123_XYZ.~"), "abc-123_XYZ.~");
+    }
+
+    #[test]
+    fn test_url_decode_invalid_percent() {
+        // Invalid percent encoding should pass through as-is
+        assert_eq!(url_decode("%ZZ"), "%ZZ");
+    }
+
+    #[test]
+    fn test_url_decode_incomplete_percent() {
+        // Incomplete percent encoding at end of string
+        assert_eq!(url_decode("abc%2"), "abc%2");
+    }
+
+    #[test]
+    fn test_url_decode_no_encoding() {
+        assert_eq!(url_decode("hello"), "hello");
+    }
+
+    #[test]
+    fn test_strip_tags_malformed() {
+        // Malformed tags should still be handled without panic
+        assert_eq!(strip_tags("text<unclosed"), "text");
+        // A bare '>' flips in_tag to false, consuming the '>' character
+        assert_eq!(strip_tags("text>after"), "textafter");
+        assert_eq!(strip_tags("<>empty</>"), "empty");
+    }
+
+    #[test]
+    fn test_strip_tags_nested_same_type() {
+        let result = strip_tags("<b>bold <b>bolder</b> bold</b>");
+        assert_eq!(result, "bold bolder bold");
+    }
+
+    #[test]
+    fn test_decode_entities_numeric() {
+        // &#39; is already handled
+        assert_eq!(decode_entities("&#39;"), "'");
+    }
+
+    #[test]
+    fn test_extract_attr_single_quotes() {
+        // extract_attr only handles double quotes
+        assert_eq!(extract_attr("<a href='url'>", "href"), None);
+    }
+
+    #[test]
+    fn test_extract_attr_missing_value() {
+        assert_eq!(extract_attr("<a href>", "href"), None);
+    }
+
+    #[test]
+    fn test_parse_ddg_results_respects_max() {
+        // Build a minimal HTML with multiple results
+        let mut html = String::new();
+        for i in 0..10 {
+            html.push_str(&format!(
+                r#"<a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F{}" class="result__a">Title {}</a>
+                <a class="result__snippet">Snippet {}</a>"#,
+                i, i, i
+            ));
+        }
+
+        let results = parse_ddg_results(&html, 3);
+        assert_eq!(results.len(), 3, "Should respect max_results limit");
+    }
+
+    #[test]
+    fn test_parse_ddg_results_extracts_fields() {
+        let html = r#"<a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage" class="result__a">Example Title</a>
+        <a class="result__snippet">This is a snippet</a>"#;
+
+        let results = parse_ddg_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Example Title");
+        assert_eq!(results[0].url, "https://example.com/page");
+        assert_eq!(results[0].snippet, "This is a snippet");
+    }
 }

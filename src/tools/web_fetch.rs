@@ -287,4 +287,92 @@ mod tests {
         let result = tool.execute(json!({"url": "http://127.0.0.1:19999/"}));
         assert!(matches!(result.unwrap_err(), ToolError::ExecutionFailed(_)));
     }
+
+    #[test]
+    fn test_html_to_text_apos_entity() {
+        let html = "it&apos;s a test";
+        let text = html_to_text(html);
+        assert_eq!(text, "it's a test");
+    }
+
+    #[test]
+    fn test_html_to_text_nbsp_entity() {
+        let html = "word1&nbsp;word2";
+        let text = html_to_text(html);
+        assert_eq!(text, "word1 word2");
+    }
+
+    #[test]
+    fn test_html_to_text_unknown_entity() {
+        let html = "&unknown; stays";
+        let text = html_to_text(html);
+        assert_eq!(text, "&unknown; stays");
+    }
+
+    #[test]
+    fn test_html_to_text_nested_tags() {
+        let html = "<div><p><b>deep</b></p></div>";
+        let text = html_to_text(html);
+        assert!(text.contains("deep"));
+    }
+
+    #[test]
+    fn test_html_to_text_comment_handling() {
+        // HTML comments are not explicitly handled but should not crash
+        let html = "before<!-- comment -->after";
+        let text = html_to_text(html);
+        // The comment content will be treated as tag content and stripped
+        assert!(text.contains("before"));
+        assert!(text.contains("after"));
+    }
+
+    #[test]
+    fn test_html_to_text_self_closing_br() {
+        let html = "line1<br/>line2<br />line3";
+        let text = html_to_text(html);
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+        assert!(text.contains("line3"));
+    }
+
+    #[test]
+    fn test_html_to_text_empty_input() {
+        assert_eq!(html_to_text(""), "");
+    }
+
+    #[test]
+    fn test_html_to_text_unicode_content() {
+        let html = "<p>日本語テスト 🦀</p>";
+        let text = html_to_text(html);
+        assert!(text.contains("日本語テスト"));
+        assert!(text.contains("🦀"));
+    }
+
+    #[test]
+    fn test_html_to_text_multiple_blank_lines_collapsed() {
+        let html = "<p>Para1</p><p></p><p></p><p></p><p>Para2</p>";
+        let text = html_to_text(html);
+        // Multiple blank lines should be collapsed to one
+        assert!(!text.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn test_web_fetch_ftp_url_rejected() {
+        let tool = WebFetchTool;
+        let result = tool.execute(json!({"url": "ftp://example.com/file"}));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
+    }
+
+    #[test]
+    fn test_web_fetch_schemeless_url_rejected() {
+        let tool = WebFetchTool;
+        let result = tool.execute(json!({"url": "//example.com"}));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::InvalidArguments(_)
+        ));
+    }
 }

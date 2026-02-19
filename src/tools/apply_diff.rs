@@ -517,4 +517,184 @@ mod tests {
         use crate::config::ToolRiskLevel;
         assert_eq!(tool.risk_level(), ToolRiskLevel::Moderate);
     }
+
+    #[test]
+    fn test_apply_diff_file_size_limit() {
+        let path = "/tmp/whet_test_diff_large.txt";
+        // Create a file larger than MAX_FILE_SIZE (10MB)
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(path).unwrap();
+            let chunk = vec![b'x'; 1_000_000];
+            for _ in 0..11 {
+                f.write_all(&chunk).unwrap();
+            }
+        }
+
+        let tool = ApplyDiffTool;
+        let result = tool.execute(json!({
+            "path": path,
+            "diff": "@@ -1,1 +1,1 @@\n-x\n+y"
+        }));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("too large"));
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_apply_diff_trailing_newline_preserved() {
+        let path = "/tmp/whet_test_diff_newline.txt";
+        setup_test_file(path, "line1\nline2\n");
+
+        let tool = ApplyDiffTool;
+        tool.execute(json!({
+            "path": path,
+            "diff": "@@ -2,1 +2,1 @@\n-line2\n+changed"
+        }))
+        .unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(
+            content.ends_with('\n'),
+            "Trailing newline should be preserved"
+        );
+        assert_eq!(content, "line1\nchanged\n");
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_apply_diff_no_trailing_newline_preserved() {
+        let path = "/tmp/whet_test_diff_no_newline.txt";
+        setup_test_file(path, "line1\nline2"); // No trailing newline
+
+        let tool = ApplyDiffTool;
+        tool.execute(json!({
+            "path": path,
+            "diff": "@@ -2,1 +2,1 @@\n-line2\n+changed"
+        }))
+        .unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(
+            !content.ends_with('\n'),
+            "Should NOT add trailing newline when original didn't have one"
+        );
+        assert_eq!(content, "line1\nchanged");
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_apply_diff_malformed_hunk_header() {
+        let path = "/tmp/whet_test_diff_malformed.txt";
+        setup_test_file(path, "content\n");
+
+        let tool = ApplyDiffTool;
+        let result = tool.execute(json!({
+            "path": path,
+            "diff": "@@ invalid header @@\n-old\n+new"
+        }));
+        assert!(result.is_err());
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_apply_diff_context_mismatch() {
+        let path = "/tmp/whet_test_diff_ctx_mismatch.txt";
+        setup_test_file(path, "alpha\nbeta\ngamma\n");
+
+        let tool = ApplyDiffTool;
+        let result = tool.execute(json!({
+            "path": path,
+            "diff": "@@ -1,3 +1,3 @@\n wrong_context\n-beta\n+BETA\n gamma"
+        }));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Context mismatch"));
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_apply_diff_multi_hunk_with_gap() {
+        let path = "/tmp/whet_test_diff_gap.txt";
+        setup_test_file(
+            path,
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\n",
+        );
+
+        let tool = ApplyDiffTool;
+        tool.execute(json!({
+            "path": path,
+            "diff": "@@ -1,1 +1,1 @@\n-line1\n+FIRST\n@@ -7,1 +7,1 @@\n-line7\n+SEVENTH"
+        }))
+        .unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("FIRST"));
+        assert!(content.contains("SEVENTH"));
+        // Lines in between should be preserved
+        assert!(content.contains("line4"));
+        assert!(content.contains("line5"));
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_apply_diff_add_lines_only() {
+        let path = "/tmp/whet_test_diff_add_only.txt";
+        setup_test_file(path, "line1\nline2\n");
+
+        let tool = ApplyDiffTool;
+        tool.execute(json!({
+            "path": path,
+            "diff": "@@ -1,1 +1,3 @@\n line1\n+new_line_a\n+new_line_b"
+        }))
+        .unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert_eq!(content, "line1\nnew_line_a\nnew_line_b\nline2\n");
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_apply_diff_remove_lines_only() {
+        let path = "/tmp/whet_test_diff_remove_only.txt";
+        setup_test_file(path, "keep\nremove_me\nalso_remove\nkeep_too\n");
+
+        let tool = ApplyDiffTool;
+        tool.execute(json!({
+            "path": path,
+            "diff": "@@ -1,4 +1,2 @@\n keep\n-remove_me\n-also_remove\n keep_too"
+        }))
+        .unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert_eq!(content, "keep\nkeep_too\n");
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_apply_diff_with_file_headers_replace() {
+        let path = "/tmp/whet_test_diff_headers2.txt";
+        setup_test_file(path, "old_line\n");
+
+        let tool = ApplyDiffTool;
+        tool.execute(json!({
+            "path": path,
+            "diff": "--- a/file.txt\n+++ b/file.txt\n@@ -1,1 +1,1 @@\n-old_line\n+new_line"
+        }))
+        .unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert_eq!(content, "new_line\n");
+
+        cleanup(path);
+    }
 }

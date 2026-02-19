@@ -1119,4 +1119,157 @@ mod tests {
         assert!(!tool_result.content.contains("plan mode"));
         assert!(tool_result.content.contains("whet"));
     }
+
+    // --- Tool output truncation tests ---
+
+    #[test]
+    fn test_tool_output_within_limit_not_truncated() {
+        // A tool that produces output just under MAX_TOOL_OUTPUT_CHARS should NOT be truncated
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "Cargo.toml"}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Read Cargo.toml");
+        assert_eq!(response, "Done.");
+
+        // Tool result should NOT contain truncation message
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(!tool_result.content.contains("truncated"));
+    }
+
+    #[test]
+    fn test_tool_output_exceeding_limit_is_truncated() {
+        // Create a large file that will produce output > MAX_TOOL_OUTPUT_CHARS
+        let path = "/tmp/whet_test_agent_large.txt";
+        let content = "x".repeat(MAX_TOOL_OUTPUT_CHARS + 1000);
+        std::fs::write(path, &content).unwrap();
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": path}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Read large file");
+        assert_eq!(response, "Done.");
+
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(
+            tool_result.content.contains("output truncated"),
+            "Large output should be truncated"
+        );
+        assert!(
+            tool_result.content.len() <= MAX_TOOL_OUTPUT_CHARS + 100,
+            "Truncated output should be within limit (got {})",
+            tool_result.content.len()
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_tool_output_truncation_utf8_safe() {
+        // Create a file with multi-byte UTF-8 chars that could cause a boundary issue
+        let path = "/tmp/whet_test_agent_utf8.txt";
+        // Each emoji is 4 bytes, so fill just over the limit
+        let emoji_count = MAX_TOOL_OUTPUT_CHARS / 4 + 500;
+        let content: String = "🦀".repeat(emoji_count);
+        std::fs::write(path, &content).unwrap();
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": path}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Read emoji file");
+        assert_eq!(response, "Done.");
+
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        // Should not panic on char boundary and should contain truncation marker
+        assert!(tool_result.content.contains("output truncated"));
+        // Verify it's valid UTF-8 (the fact that we can access .content proves it)
+        assert!(tool_result
+            .content
+            .is_char_boundary(tool_result.content.len()));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_tool_output_exactly_at_limit_not_truncated() {
+        let path = "/tmp/whet_test_agent_exact.txt";
+        let content = "a".repeat(MAX_TOOL_OUTPUT_CHARS);
+        std::fs::write(path, &content).unwrap();
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": path}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        agent.process_message("Read file");
+
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(
+            !tool_result.content.contains("truncated"),
+            "Output exactly at limit should NOT be truncated"
+        );
+
+        std::fs::remove_file(path).ok();
+    }
 }
