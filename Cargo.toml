@@ -2,10 +2,14 @@
 name = "whet"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 description = "An open-source terminal coding agent. Powered by local or cloud LLMs."
 license = "MIT"
 repository = "https://github.com/kuroko1t/whet"
 readme = "README.md"
+authors = ["kuroko1t"]
+keywords = ["ai", "agent", "llm", "cli", "coding"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
