@@ -177,4 +177,59 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
+
+    #[test]
+    fn test_read_via_symlink_to_sensitive_blocked() {
+        let link_path = "/tmp/whet_test_read_symlink";
+        std::fs::remove_file(link_path).ok();
+        std::os::unix::fs::symlink("/etc/shadow", link_path).ok();
+
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({"path": link_path}));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
+
+        std::fs::remove_file(link_path).ok();
+    }
+
+    #[test]
+    fn test_read_via_symlink_to_safe_allowed() {
+        let target = "/tmp/whet_test_read_symlink_target.txt";
+        let link_path = "/tmp/whet_test_read_symlink_safe";
+        std::fs::write(target, "safe content via symlink").unwrap();
+        std::fs::remove_file(link_path).ok();
+        std::os::unix::fs::symlink(target, link_path).ok();
+
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({"path": link_path})).unwrap();
+        assert_eq!(result, "safe content via symlink");
+
+        std::fs::remove_file(link_path).ok();
+        std::fs::remove_file(target).ok();
+    }
+
+    #[test]
+    fn test_read_file_size_limit() {
+        let path = "/tmp/whet_test_large_file.txt";
+        // Create a file slightly larger than MAX_FILE_SIZE (10MB)
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(path).unwrap();
+            let chunk = vec![b'x'; 1_000_000]; // 1MB chunks
+            for _ in 0..11 {
+                f.write_all(&chunk).unwrap();
+            }
+        }
+
+        let tool = ReadFileTool;
+        let result = tool.execute(json!({"path": path}));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("too large"));
+
+        std::fs::remove_file(path).ok();
+    }
 }

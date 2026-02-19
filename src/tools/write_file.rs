@@ -225,4 +225,61 @@ mod tests {
 
         fs::remove_file(path).ok();
     }
+
+    #[test]
+    fn test_write_via_symlink_to_sensitive_blocked() {
+        let link_path = "/tmp/whet_test_write_symlink";
+        fs::remove_file(link_path).ok();
+        std::os::unix::fs::symlink("/etc/shadow", link_path).ok();
+
+        let tool = WriteFileTool;
+        let result = tool.execute(json!({"path": link_path, "content": "bad"}));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
+
+        fs::remove_file(link_path).ok();
+    }
+
+    #[test]
+    fn test_write_via_symlink_to_safe_allowed() {
+        let target = "/tmp/whet_test_write_symlink_target.txt";
+        let link_path = "/tmp/whet_test_write_symlink_safe";
+        fs::remove_file(link_path).ok();
+        fs::remove_file(target).ok();
+
+        // Create target and symlink
+        fs::write(target, "").ok();
+        std::os::unix::fs::symlink(target, link_path).ok();
+
+        let tool = WriteFileTool;
+        let result = tool
+            .execute(json!({"path": link_path, "content": "written via symlink"}))
+            .unwrap();
+        assert!(result.contains("Successfully wrote"));
+
+        let read_back = fs::read_to_string(target).unwrap();
+        assert_eq!(read_back, "written via symlink");
+
+        fs::remove_file(link_path).ok();
+        fs::remove_file(target).ok();
+    }
+
+    #[test]
+    fn test_write_unicode_content() {
+        let tool = WriteFileTool;
+        let path = "/tmp/whet_test_write_unicode.txt";
+        let content = "日本語テスト 🦀 émojis & spëcial chars";
+        let result = tool
+            .execute(json!({"path": path, "content": content}))
+            .unwrap();
+        assert!(result.contains("Successfully wrote"));
+
+        let read_back = fs::read_to_string(path).unwrap();
+        assert_eq!(read_back, content);
+
+        fs::remove_file(path).ok();
+    }
 }

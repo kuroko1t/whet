@@ -203,4 +203,113 @@ mod tests {
         let result = tool.execute(json!({"path": "Cargo.toml"}));
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_list_max_entries_truncated() {
+        let dir = "/tmp/whet_test_max_entries";
+        fs::create_dir_all(dir).ok();
+        // Create MAX_ENTRIES + 10 files
+        for i in 0..MAX_ENTRIES + 10 {
+            let path = format!("{}/file_{:06}.txt", dir, i);
+            fs::write(&path, "x").ok();
+        }
+
+        let tool = ListDirTool;
+        let result = tool.execute(json!({"path": dir})).unwrap();
+        assert!(
+            result.contains("...[truncated]"),
+            "Should indicate truncation when exceeding MAX_ENTRIES"
+        );
+        // Count entries (excluding truncated marker)
+        let count = result.lines().filter(|l| !l.contains("truncated")).count();
+        assert!(
+            count <= MAX_ENTRIES,
+            "Should not exceed MAX_ENTRIES (got {})",
+            count
+        );
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_list_blocked_sensitive_path() {
+        let tool = ListDirTool;
+        let result = tool.execute(json!({"path": "~/.ssh"}));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
+    }
+
+    #[test]
+    fn test_list_hidden_files_shown() {
+        let dir = "/tmp/whet_test_hidden";
+        fs::create_dir_all(dir).ok();
+        fs::write(format!("{}/.hidden_file", dir), "hidden").ok();
+        fs::write(format!("{}/visible_file", dir), "visible").ok();
+
+        let tool = ListDirTool;
+        let result = tool.execute(json!({"path": dir})).unwrap();
+        assert!(
+            result.contains(".hidden_file"),
+            "Hidden files should be listed"
+        );
+        assert!(result.contains("visible_file"));
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_list_recursive_depth_limit() {
+        let base = "/tmp/whet_test_depth";
+        fs::remove_dir_all(base).ok();
+        // Create deeply nested directories (deeper than MAX_DEPTH)
+        let mut path = base.to_string();
+        for i in 0..MAX_DEPTH + 3 {
+            path = format!("{}/level_{}", path, i);
+            fs::create_dir_all(&path).ok();
+            fs::write(format!("{}/file.txt", path), "x").ok();
+        }
+
+        let tool = ListDirTool;
+        let result = tool
+            .execute(json!({"path": base, "recursive": true}))
+            .unwrap();
+        assert!(
+            result.contains("...[truncated]"),
+            "Should truncate at MAX_DEPTH"
+        );
+
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn test_list_symlink_dir_not_followed_recursively() {
+        let base = "/tmp/whet_test_symlink_dir";
+        let target = "/tmp/whet_test_symlink_target_dir";
+        fs::remove_dir_all(base).ok();
+        fs::remove_dir_all(target).ok();
+
+        fs::create_dir_all(base).ok();
+        fs::create_dir_all(target).ok();
+        fs::write(format!("{}/target_file.txt", target), "x").ok();
+
+        // Create symlink inside base pointing to target
+        std::os::unix::fs::symlink(target, format!("{}/link", base)).ok();
+
+        let tool = ListDirTool;
+        let result = tool
+            .execute(json!({"path": base, "recursive": true}))
+            .unwrap();
+        // The symlink directory should be listed but not recursed into
+        assert!(result.contains("link/"), "Symlink dir should be listed");
+        assert!(
+            !result.contains("target_file.txt"),
+            "Should NOT recurse into symlink directory"
+        );
+
+        fs::remove_dir_all(base).ok();
+        fs::remove_dir_all(target).ok();
+    }
 }

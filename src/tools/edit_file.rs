@@ -348,4 +348,76 @@ mod tests {
         let ctx = get_context(content, pos, "REPLACED".len());
         assert!(ctx.contains("REPLACED"));
     }
+
+    #[test]
+    fn test_edit_file_via_symlink_to_sensitive_blocked() {
+        let link_path = "/tmp/whet_test_edit_symlink";
+        fs::remove_file(link_path).ok();
+        std::os::unix::fs::symlink("/etc/shadow", link_path).ok();
+
+        let tool = EditFileTool;
+        let result = tool.execute(json!({
+            "path": link_path,
+            "old_text": "root",
+            "new_text": "hacked"
+        }));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
+
+        fs::remove_file(link_path).ok();
+    }
+
+    #[test]
+    fn test_edit_file_via_symlink_to_safe_allowed() {
+        let target = "/tmp/whet_test_edit_symlink_target.txt";
+        let link_path = "/tmp/whet_test_edit_symlink_safe";
+        fs::remove_file(link_path).ok();
+        setup_test_file(target, "Hello World\nGoodbye World\n");
+        std::os::unix::fs::symlink(target, link_path).ok();
+
+        let tool = EditFileTool;
+        let result = tool
+            .execute(json!({
+                "path": link_path,
+                "old_text": "Hello World",
+                "new_text": "Hi World"
+            }))
+            .unwrap();
+        assert!(result.contains("Successfully edited"));
+
+        let content = fs::read_to_string(target).unwrap();
+        assert!(content.contains("Hi World"));
+
+        fs::remove_file(link_path).ok();
+        cleanup(target);
+    }
+
+    #[test]
+    fn test_edit_file_size_limit() {
+        let path = "/tmp/whet_test_edit_large.txt";
+        // Create a file larger than MAX_FILE_SIZE (10MB)
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(path).unwrap();
+            let chunk = vec![b'x'; 1_000_000];
+            for _ in 0..11 {
+                f.write_all(&chunk).unwrap();
+            }
+        }
+
+        let tool = EditFileTool;
+        let result = tool.execute(json!({
+            "path": path,
+            "old_text": "x",
+            "new_text": "y"
+        }));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("too large"));
+
+        cleanup(path);
+    }
 }

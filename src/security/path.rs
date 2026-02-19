@@ -477,6 +477,50 @@ fn check_single_command(command: &str, original: &str) -> Result<(), String> {
         }
     }
 
+    // tee, xargs, chmod, chown with sensitive paths
+    let path_arg_cmds = ["tee", "chmod", "chown", "chgrp", "ln"];
+    if path_arg_cmds.contains(&cmd_base) {
+        for token in tokens.iter().skip(1) {
+            if token.starts_with('-') {
+                continue;
+            }
+            if !is_path_safe(token) {
+                return Err(format!(
+                    "Command blocked: '{}' accesses sensitive path '{}'",
+                    original, token
+                ));
+            }
+        }
+    }
+
+    // xargs: recursively check the command being executed
+    if cmd_base == "xargs" {
+        let inner_tokens: Vec<&str> = tokens
+            .iter()
+            .skip(1)
+            .skip_while(|t| t.starts_with('-'))
+            .copied()
+            .collect();
+        if !inner_tokens.is_empty() {
+            let inner = inner_tokens.join(" ");
+            let inner_base = inner_tokens[0]
+                .rsplit('/')
+                .next()
+                .unwrap_or(inner_tokens[0]);
+            // If xargs runs a dangerous command, block it
+            let dangerous_xargs_cmds = [
+                "cat", "head", "tail", "less", "more", "rm", "cp", "mv", "chmod", "chown", "sudo",
+                "sh", "bash",
+            ];
+            if dangerous_xargs_cmds.contains(&inner_base) {
+                return Err(format!(
+                    "Command blocked: '{}' uses xargs with potentially dangerous command '{}'",
+                    original, inner
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -521,6 +565,81 @@ fn check_inline_script_safety(command: &str, original: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// Check if a command contains output redirection to sensitive paths.
+/// Handles `>`, `>>`, `2>`, `2>>`, `&>`, `&>>` operators.
+fn check_redirection_targets(command: &str, original: &str) -> Result<(), String> {
+    let bytes = command.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while i < len {
+        if bytes[i] == b'\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'\\' && !in_single_quote && i + 1 < len {
+            i += 2;
+            continue;
+        }
+
+        if !in_single_quote && !in_double_quote {
+            // Match >, >>, 2>, 2>>, &>, &>>
+            let is_redirect = bytes[i] == b'>'
+                || (i + 1 < len
+                    && (bytes[i] == b'2' || bytes[i] == b'&' || bytes[i] == b'1')
+                    && bytes[i + 1] == b'>');
+
+            if is_redirect {
+                // Advance past the redirect operator
+                let mut j = i;
+                // Skip fd number or &
+                if bytes[j] == b'2' || bytes[j] == b'&' || bytes[j] == b'1' {
+                    j += 1;
+                }
+                // Skip > or >>
+                if j < len && bytes[j] == b'>' {
+                    j += 1;
+                }
+                if j < len && bytes[j] == b'>' {
+                    j += 1; // >>
+                }
+                // Skip whitespace
+                while j < len && bytes[j] == b' ' {
+                    j += 1;
+                }
+                // Extract the target path
+                let target_start = j;
+                while j < len && bytes[j] != b' ' && bytes[j] != b';' && bytes[j] != b'&' {
+                    j += 1;
+                }
+                if target_start < j {
+                    let target = &command[target_start..j];
+                    let target = target.trim_matches(|c: char| c == '\'' || c == '"');
+                    if !target.is_empty() && !is_path_safe(target) {
+                        return Err(format!(
+                            "Command blocked: '{}' redirects output to sensitive path '{}'",
+                            original, target
+                        ));
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+    Ok(())
+}
+
 /// Check if a shell command is safe to execute.
 /// Returns Ok(()) if safe, Err(reason) if blocked.
 pub fn check_command_safety(command: &str) -> Result<(), String> {
@@ -539,6 +658,9 @@ pub fn check_command_safety(command: &str) -> Result<(), String> {
             command
         ));
     }
+
+    // 0.5. Check for output redirection to sensitive paths
+    check_redirection_targets(trimmed, command)?;
 
     // 1. Split on chain operators (&&, ||, ;) and check each sub-command
     let chain_parts = split_shell_commands(trimmed);
@@ -933,5 +1055,161 @@ mod tests {
     #[test]
     fn test_command_allows_diff_safe() {
         assert!(check_command_safety("diff src/main.rs src/lib.rs").is_ok());
+    }
+
+    // -- output redirection bypass tests --
+
+    #[test]
+    fn test_command_blocks_redirect_to_sensitive_path() {
+        assert!(check_command_safety("echo bad > /etc/shadow").is_err());
+        assert!(check_command_safety("echo bad >> /etc/shadow").is_err());
+    }
+
+    #[test]
+    fn test_command_blocks_redirect_stderr_to_sensitive() {
+        assert!(check_command_safety("echo bad 2> /etc/shadow").is_err());
+        assert!(check_command_safety("echo bad 2>> /etc/shadow").is_err());
+    }
+
+    #[test]
+    fn test_command_blocks_redirect_all_to_sensitive() {
+        assert!(check_command_safety("echo bad &> /etc/shadow").is_err());
+        assert!(check_command_safety("echo bad &>> /etc/shadow").is_err());
+    }
+
+    #[test]
+    fn test_command_blocks_redirect_to_ssh_key() {
+        assert!(check_command_safety("echo bad > ~/.ssh/authorized_keys").is_err());
+    }
+
+    #[test]
+    fn test_command_allows_redirect_to_safe_path() {
+        assert!(check_command_safety("echo hello > /tmp/test.txt").is_ok());
+        assert!(check_command_safety("echo hello >> /tmp/test.txt").is_ok());
+        assert!(check_command_safety("ls > /tmp/listing.txt").is_ok());
+    }
+
+    // -- tee bypass tests --
+
+    #[test]
+    fn test_command_blocks_tee_to_sensitive_path() {
+        assert!(check_command_safety("echo bad | tee /etc/shadow").is_err());
+        assert!(check_command_safety("echo bad | tee -a /etc/shadow").is_err());
+    }
+
+    #[test]
+    fn test_command_allows_tee_to_safe_path() {
+        assert!(check_command_safety("echo hello | tee /tmp/test.txt").is_ok());
+    }
+
+    // -- chmod/chown bypass tests --
+
+    #[test]
+    fn test_command_blocks_chmod_sensitive() {
+        assert!(check_command_safety("chmod 777 /etc/shadow").is_err());
+        assert!(check_command_safety("chown root /etc/shadow").is_err());
+    }
+
+    #[test]
+    fn test_command_allows_chmod_safe() {
+        assert!(check_command_safety("chmod 644 /tmp/test.txt").is_ok());
+    }
+
+    // -- xargs bypass tests --
+
+    #[test]
+    fn test_command_blocks_xargs_cat() {
+        assert!(check_command_safety("echo /etc/shadow | xargs cat").is_err());
+    }
+
+    #[test]
+    fn test_command_blocks_xargs_rm() {
+        assert!(check_command_safety("find / -name '*.log' | xargs rm").is_err());
+    }
+
+    #[test]
+    fn test_command_blocks_xargs_sudo() {
+        assert!(check_command_safety("echo cmd | xargs sudo").is_err());
+    }
+
+    #[test]
+    fn test_command_allows_xargs_safe() {
+        assert!(check_command_safety("find . -name '*.rs' | xargs wc -l").is_ok());
+        assert!(check_command_safety("echo hello | xargs echo").is_ok());
+    }
+
+    // -- symlink resolution tests for is_path_safe --
+
+    #[test]
+    fn test_symlink_to_sensitive_path_blocked() {
+        let link_path = "/tmp/whet_test_symlink_shadow";
+        // Clean up from previous runs
+        std::fs::remove_file(link_path).ok();
+        // Create a symlink pointing to /etc/shadow
+        std::os::unix::fs::symlink("/etc/shadow", link_path).ok();
+        // is_path_safe should resolve the symlink and block it
+        assert!(
+            !is_path_safe(link_path),
+            "Symlink to /etc/shadow should be blocked"
+        );
+        std::fs::remove_file(link_path).ok();
+    }
+
+    #[test]
+    fn test_symlink_to_ssh_dir_blocked() {
+        let link_path = "/tmp/whet_test_symlink_ssh";
+        std::fs::remove_file(link_path).ok();
+        if let Some(home) = dirs::home_dir() {
+            let ssh_dir = format!("{}/.ssh", home.display());
+            if std::path::Path::new(&ssh_dir).exists() {
+                std::os::unix::fs::symlink(&ssh_dir, link_path).ok();
+                // Accessing a file through the symlink should be blocked
+                let test_path = format!("{}/id_rsa", link_path);
+                assert!(
+                    !is_path_safe(&test_path),
+                    "Symlink to ~/.ssh should be blocked"
+                );
+            }
+        }
+        std::fs::remove_file(link_path).ok();
+    }
+
+    #[test]
+    fn test_symlink_to_safe_path_allowed() {
+        let link_path = "/tmp/whet_test_symlink_safe";
+        let target = "/tmp/whet_test_symlink_target.txt";
+        std::fs::remove_file(link_path).ok();
+        std::fs::write(target, "safe content").ok();
+        std::os::unix::fs::symlink(target, link_path).ok();
+        assert!(
+            is_path_safe(link_path),
+            "Symlink to safe path should be allowed"
+        );
+        std::fs::remove_file(link_path).ok();
+        std::fs::remove_file(target).ok();
+    }
+
+    // -- read_file/write_file symlink tests via tool integration --
+
+    #[test]
+    fn test_command_blocks_cat_via_symlink() {
+        let link_path = "/tmp/whet_test_symlink_cat";
+        std::fs::remove_file(link_path).ok();
+        std::os::unix::fs::symlink("/etc/shadow", link_path).ok();
+        assert!(check_command_safety(&format!("cat {}", link_path)).is_err());
+        std::fs::remove_file(link_path).ok();
+    }
+
+    // -- redirect within chain tests --
+
+    #[test]
+    fn test_command_blocks_redirect_in_chain() {
+        assert!(check_command_safety("echo hi && echo bad > /etc/shadow").is_err());
+        assert!(check_command_safety("echo hi; echo bad >> /etc/shadow").is_err());
+    }
+
+    #[test]
+    fn test_command_blocks_redirect_with_traversal() {
+        assert!(check_command_safety("echo bad > /tmp/../etc/shadow").is_err());
     }
 }
