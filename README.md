@@ -14,6 +14,10 @@
 Powered by local or cloud LLMs. Rust single-binary. No runtime dependencies.
 </p>
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="Whet in action" width="800">
+</p>
+
 ---
 
 ## What is Whet?
