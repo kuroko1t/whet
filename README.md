@@ -35,7 +35,7 @@ git clone https://github.com/kuroko1t/whet.git
 cd whet && cargo install --path .
 
 # 2. Pull a local model (or configure a cloud provider)
-ollama pull qwen2.5:7b
+ollama pull qwen3:8b
 
 # 3. Start coding
 whet
@@ -45,7 +45,7 @@ Or use with a cloud provider:
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-whet chat -m claude-sonnet-4-5-20250929
+whet -m claude-sonnet-4-5-20250929
 ```
 
 ## Demo
@@ -54,26 +54,26 @@ whet chat -m claude-sonnet-4-5-20250929
 $ whet
 
 whet v0.1.0
-Model: qwen2.5:7b
+Model: qwen3:8b
 Permission: default
 Type Ctrl+D to exit.
 
-you> Find all TODO comments and fix them
+you> Find all deprecation warnings and fix them
 
-  [tool: grep] {"pattern": "TODO", "path": "."}
+  [tool: grep] {"pattern": "deprecated", "path": "."}
 
-I found 3 TODO comments. Let me fix them one by one.
+I found 3 deprecation warnings. Let me fix them one by one.
 
   [tool: read_file] {"path": "src/main.rs"}
   [tool: edit_file] {"path": "src/main.rs", ...}
 
   Tool 'edit_file' wants to execute:
     path: src/main.rs
-    old_text: // TODO: add retry logic
-    new_text: for attempt in 1..=3 { ... }
+    old_text: use old_module::deprecated_fn;
+    new_text: use new_module::updated_fn;
   Allow? [y/N/a(lways)] y
 
-Done! Fixed all 3 TODO items.
+Done! Fixed all 3 deprecation warnings.
 (2.3s)
 ```
 
@@ -169,7 +169,7 @@ Config file: `~/.whet/config.toml`
 ```toml
 [llm]
 provider = "ollama"
-model = "qwen2.5:7b"
+model = "qwen3:8b"
 base_url = "http://localhost:11434"
 # api_key = "sk-..."
 # streaming = true
@@ -233,12 +233,12 @@ Skills are injected into the system prompt automatically. Use `/skills` to list 
 ## CLI
 
 ```bash
-whet                             # start interactive chat (default)
+whet                             # start interactive chat
 whet "fix the bug"               # single-shot mode
-whet chat -m llama3.2:3b         # use a specific model
-whet chat --continue             # resume last conversation
-whet chat -p "explain main.rs"   # single-shot via subcommand
-whet chat -y                     # skip all permission prompts
+whet -m llama3.2:3b              # use a specific model
+whet --continue                  # resume last conversation
+whet -p "explain main.rs"        # single-shot via -p flag
+whet -y                          # skip all permission prompts
 whet tools                       # list available tools
 whet config                      # show current configuration
 ```

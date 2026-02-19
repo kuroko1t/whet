@@ -69,28 +69,30 @@ struct Cli {
     /// Single-shot prompt (e.g., whet "fix the bug")
     #[arg(trailing_var_arg = true, num_args = 0..)]
     prompt: Vec<String>,
+
+    /// LLM model to use
+    #[arg(short, long)]
+    model: Option<String>,
+
+    /// Continue the last conversation
+    #[arg(long, short = 'c')]
+    r#continue: bool,
+
+    /// Force a new conversation (default)
+    #[arg(long)]
+    new: bool,
+
+    /// Single-shot mode: send a message and exit
+    #[arg(short = 'p', long = "prompt")]
+    message: Option<String>,
+
+    /// Skip all permission prompts (yolo mode)
+    #[arg(short = 'y', long = "yolo")]
+    yolo: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start interactive chat
-    Chat {
-        /// Ollama model to use
-        #[arg(short, long)]
-        model: Option<String>,
-        /// Continue the last conversation
-        #[arg(long, short = 'c')]
-        r#continue: bool,
-        /// Force a new conversation (default)
-        #[arg(long)]
-        new: bool,
-        /// Single-shot mode: send a message and exit
-        #[arg(short = 'p', long = "prompt")]
-        message: Option<String>,
-        /// Skip all permission prompts (yolo mode)
-        #[arg(short = 'y', long = "yolo")]
-        yolo: bool,
-    },
     /// List available tools
     Tools,
     /// Show configuration
@@ -729,15 +731,6 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Chat {
-            model,
-            r#continue,
-            new: _,
-            message,
-            yolo,
-        }) => {
-            run_chat(model, r#continue, message, yolo);
-        }
         Some(Commands::Tools) => {
             let cfg = Config::load();
             let mut registry = default_registry();
@@ -765,12 +758,12 @@ fn main() {
         None => {
             // Default: `whet` alone or `whet "fix the bug"`
             let prompt_text = cli.prompt.join(" ");
-            let message = if prompt_text.is_empty() {
+            let message = cli.message.or(if prompt_text.is_empty() {
                 None
             } else {
                 Some(prompt_text)
-            };
-            run_chat(None, false, message, false);
+            });
+            run_chat(cli.model, cli.r#continue, message, cli.yolo);
         }
     }
 }
