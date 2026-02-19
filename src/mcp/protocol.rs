@@ -74,6 +74,7 @@ pub struct McpToolInfo {
 pub struct McpToolCallResult {
     pub content: Vec<McpContent>,
     #[serde(default)]
+    #[serde(alias = "isError")]
     pub is_error: bool,
 }
 
@@ -280,6 +281,17 @@ mod tests {
         });
         let result: McpToolCallResult = serde_json::from_value(json_val).unwrap();
         assert!(!result.is_error);
+    }
+
+    #[test]
+    fn test_tool_call_result_camel_case_is_error() {
+        // Real MCP servers use camelCase "isError"
+        let json_val = json!({
+            "content": [{"type": "text", "text": "access denied"}],
+            "isError": true
+        });
+        let result: McpToolCallResult = serde_json::from_value(json_val).unwrap();
+        assert!(result.is_error);
     }
 
     #[test]
