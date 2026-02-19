@@ -5,6 +5,18 @@ use serde_json::json;
 const MAX_DEPTH: usize = 10;
 const MAX_ENTRIES: usize = 5000;
 
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".next",
+];
+
 pub struct ListDirTool;
 
 impl Tool for ListDirTool {
@@ -90,6 +102,11 @@ fn list_entries(
         if path_buf.is_dir() {
             entries.push(format!("{}/", display));
             if recursive {
+                // Skip well-known build/dependency directories to avoid huge output
+                let dir_name = path_buf.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if SKIP_DIRS.contains(&dir_name) {
+                    continue;
+                }
                 // Skip symlinks to prevent infinite recursion from cycles
                 let is_symlink = path_buf
                     .symlink_metadata()
@@ -279,6 +296,72 @@ mod tests {
         assert!(
             result.contains("...[truncated]"),
             "Should truncate at MAX_DEPTH"
+        );
+
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn test_recursive_skips_skip_dirs_contents() {
+        let base = "/tmp/whet_test_skip_dirs";
+        fs::remove_dir_all(base).ok();
+        fs::create_dir_all(format!("{}/target/debug", base)).ok();
+        fs::write(format!("{}/target/debug/binary", base), "x").ok();
+        fs::create_dir_all(format!("{}/node_modules/pkg", base)).ok();
+        fs::write(format!("{}/node_modules/pkg/index.js", base), "x").ok();
+        fs::create_dir_all(format!("{}/src", base)).ok();
+        fs::write(format!("{}/src/main.rs", base), "fn main() {}").ok();
+
+        let tool = ListDirTool;
+        let result = tool
+            .execute(json!({"path": base, "recursive": true}))
+            .unwrap();
+
+        // target/ and node_modules/ directories should be listed
+        assert!(
+            result.contains("target/"),
+            "target/ directory should appear in listing"
+        );
+        assert!(
+            result.contains("node_modules/"),
+            "node_modules/ directory should appear in listing"
+        );
+        // But their contents should NOT be listed
+        assert!(
+            !result.contains("debug"),
+            "target/debug should not be listed (SKIP_DIRS)"
+        );
+        assert!(
+            !result.contains("index.js"),
+            "node_modules/pkg/index.js should not be listed (SKIP_DIRS)"
+        );
+        // Normal directories should still be recursed
+        assert!(
+            result.contains("main.rs"),
+            "src/main.rs should be listed normally"
+        );
+
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn test_non_recursive_unaffected_by_skip_dirs() {
+        let base = "/tmp/whet_test_skip_dirs_nonrec";
+        fs::remove_dir_all(base).ok();
+        fs::create_dir_all(format!("{}/target", base)).ok();
+        fs::create_dir_all(format!("{}/src", base)).ok();
+
+        let tool = ListDirTool;
+        let result = tool.execute(json!({"path": base})).unwrap();
+
+        // Non-recursive should list both target/ and src/ without filtering
+        assert!(
+            result.contains("target/"),
+            "target/ should appear in non-recursive listing"
+        );
+        assert!(
+            result.contains("src/"),
+            "src/ should appear in non-recursive listing"
         );
 
         fs::remove_dir_all(base).ok();

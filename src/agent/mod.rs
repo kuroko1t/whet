@@ -5,6 +5,7 @@ use crate::llm::{LlmProvider, Message};
 use crate::skills::Skill;
 use crate::tools::ToolRegistry;
 use colored::Colorize;
+use std::collections::HashSet;
 
 const MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
 const MAX_CONTEXT_MESSAGES: usize = 40;
@@ -15,6 +16,8 @@ pub struct Agent {
     pub tools: ToolRegistry,
     pub memory: Vec<Message>,
     pub config: AgentConfig,
+    /// Tracks paths that have been read via read_file, used to enforce read-before-edit.
+    read_paths: HashSet<String>,
 }
 
 pub struct AgentConfig {
@@ -51,6 +54,7 @@ impl Agent {
             tools,
             memory,
             config,
+            read_paths: HashSet::new(),
         }
     }
 
@@ -194,7 +198,27 @@ impl Agent {
                     tool_call.arguments.to_string().dimmed()
                 );
 
-                let result = if let Some(tool) = self.tools.get(&tool_call.name) {
+                // Track read_file calls and enforce read-before-edit
+                if tool_call.name == "read_file" {
+                    if let Some(p) = tool_call.arguments["path"].as_str() {
+                        self.read_paths.insert(Self::normalize_tool_path(p));
+                    }
+                }
+
+                let needs_read_first = (tool_call.name == "edit_file"
+                    || tool_call.name == "apply_diff")
+                    && tool_call.arguments["path"].as_str().map_or(true, |p| {
+                        !self.read_paths.contains(&Self::normalize_tool_path(p))
+                    });
+
+                let result = if needs_read_first {
+                    let p = tool_call.arguments["path"].as_str().unwrap_or("<unknown>");
+                    format!(
+                        "Warning: You must read_file(\"{}\") before using {}. \
+                         Read the file first to see its current content, then retry.",
+                        p, tool_call.name
+                    )
+                } else if let Some(tool) = self.tools.get(&tool_call.name) {
                     // Determine effective risk level (dynamic for git)
                     let effective_risk = if tool_call.name == "git" {
                         let git_cmd = tool_call.arguments["command"].as_str().unwrap_or("");
@@ -249,6 +273,23 @@ impl Agent {
         }
 
         "Max iterations reached. The agent could not complete the task.".to_string()
+    }
+
+    /// Normalize a tool path for read-before-edit tracking.
+    /// Resolves "./src/main.rs" and "src/main.rs" to the same key.
+    fn normalize_tool_path(path: &str) -> String {
+        use std::path::{Component, PathBuf};
+        let mut normalized = PathBuf::new();
+        for component in std::path::Path::new(path).components() {
+            match component {
+                Component::CurDir => {} // skip "."
+                Component::ParentDir => {
+                    normalized.pop();
+                }
+                other => normalized.push(other),
+            }
+        }
+        normalized.to_string_lossy().to_string()
     }
 
     /// Determine if a tool at the given risk level needs user approval.
@@ -1268,6 +1309,227 @@ mod tests {
         assert!(
             !tool_result.content.contains("truncated"),
             "Output exactly at limit should NOT be truncated"
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    // --- Read-before-edit enforcement tests ---
+
+    #[test]
+    fn test_edit_file_without_read_returns_warning() {
+        let path = "/tmp/whet_test_edit_no_read.txt";
+        std::fs::write(path, "hello world").unwrap();
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "edit_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": path,
+                        "old_text": "hello",
+                        "new_text": "hi"
+                    }),
+                }],
+            },
+            LlmResponse {
+                content: Some("Warned.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        agent.process_message("Edit the file");
+
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(
+            tool_result.content.contains("Warning: You must read_file"),
+            "edit_file without prior read should return warning, got: {}",
+            tool_result.content
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_edit_file_after_read_succeeds() {
+        let path = "/tmp/whet_test_edit_after_read.txt";
+        std::fs::write(path, "hello world").unwrap();
+
+        let llm = MockLlm::new(vec![
+            // Step 1: read_file
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": path}),
+                }],
+            },
+            // Step 2: edit_file (should succeed now)
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "edit_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": path,
+                        "old_text": "hello",
+                        "new_text": "hi"
+                    }),
+                }],
+            },
+            LlmResponse {
+                content: Some("Edited.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Read then edit");
+        assert_eq!(response, "Edited.");
+
+        // Verify edit_file result does NOT contain a warning
+        let tool_results: Vec<_> = agent
+            .memory
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .collect();
+        assert!(tool_results.len() >= 2);
+        let edit_result = &tool_results[1].content;
+        assert!(
+            !edit_result.contains("Warning"),
+            "edit_file after read should not warn, got: {}",
+            edit_result
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_edit_file_path_normalization() {
+        let path = "/tmp/whet_test_edit_norm.txt";
+        std::fs::write(path, "hello world").unwrap();
+
+        let llm = MockLlm::new(vec![
+            // read_file with "./" prefix
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "./tmp/whet_test_edit_norm.txt"}),
+                }],
+            },
+            // edit_file without "./" prefix — should still match
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "edit_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": "tmp/whet_test_edit_norm.txt",
+                        "old_text": "hello",
+                        "new_text": "hi"
+                    }),
+                }],
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        agent.process_message("Normalize paths");
+
+        let tool_results: Vec<_> = agent
+            .memory
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .collect();
+        assert!(tool_results.len() >= 2);
+        let edit_result = &tool_results[1].content;
+        assert!(
+            !edit_result.contains("Warning"),
+            "Normalized paths should match: got: {}",
+            edit_result
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_apply_diff_without_read_returns_warning() {
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "apply_diff".to_string(),
+                    arguments: serde_json::json!({
+                        "path": "src/main.rs",
+                        "diff": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new"
+                    }),
+                }],
+            },
+            LlmResponse {
+                content: Some("Warned.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        agent.process_message("Apply diff");
+
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(
+            tool_result.content.contains("Warning: You must read_file"),
+            "apply_diff without prior read should warn, got: {}",
+            tool_result.content
+        );
+    }
+
+    #[test]
+    fn test_write_file_without_read_succeeds() {
+        let path = "/tmp/whet_test_write_no_read.txt";
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": path,
+                        "content": "new file content"
+                    }),
+                }],
+            },
+            LlmResponse {
+                content: Some("Written.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Write file");
+        assert_eq!(response, "Written.");
+
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(
+            !tool_result.content.contains("Warning"),
+            "write_file should not require prior read, got: {}",
+            tool_result.content
         );
 
         std::fs::remove_file(path).ok();
