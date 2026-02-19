@@ -56,10 +56,15 @@ impl MemoryStore {
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 tool_call_id TEXT,
+                tool_calls TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id)
             );",
         )?;
+        // Migration: add tool_calls column for existing databases
+        let _ = self
+            .conn
+            .execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT", []);
         Ok(())
     }
 
@@ -78,12 +83,13 @@ impl MemoryStore {
         role: &str,
         content: &str,
         tool_call_id: Option<&str>,
+        tool_calls_json: Option<&str>,
     ) -> SqliteResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, tool_call_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![conversation_id, role, content, tool_call_id, now],
+            "INSERT INTO messages (conversation_id, role, content, tool_call_id, tool_calls, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![conversation_id, role, content, tool_call_id, tool_calls_json, now],
         )?;
         // Update conversation timestamp
         self.conn.execute(
@@ -93,12 +99,13 @@ impl MemoryStore {
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn load_messages(
         &self,
         conversation_id: &str,
-    ) -> SqliteResult<Vec<(String, String, Option<String>)>> {
+    ) -> SqliteResult<Vec<(String, String, Option<String>, Option<String>)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT role, content, tool_call_id FROM messages
+            "SELECT role, content, tool_call_id, tool_calls FROM messages
              WHERE conversation_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![conversation_id], |row| {
@@ -106,6 +113,7 @@ impl MemoryStore {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })?;
         rows.collect()
@@ -135,10 +143,10 @@ mod tests {
         let store = MemoryStore::in_memory().unwrap();
         store.create_conversation("test-conv-1").unwrap();
         store
-            .save_message("test-conv-1", "user", "Hello", None)
+            .save_message("test-conv-1", "user", "Hello", None, None)
             .unwrap();
         store
-            .save_message("test-conv-1", "assistant", "Hi there!", None)
+            .save_message("test-conv-1", "assistant", "Hi there!", None, None)
             .unwrap();
 
         let messages = store.load_messages("test-conv-1").unwrap();
@@ -160,7 +168,9 @@ mod tests {
         assert!(store.get_latest_conversation_id().unwrap().is_none());
 
         // Only conversations with messages should be returned
-        store.save_message("conv-1", "user", "hello", None).unwrap();
+        store
+            .save_message("conv-1", "user", "hello", None, None)
+            .unwrap();
         let latest = store.get_latest_conversation_id().unwrap();
         assert_eq!(latest, Some("conv-1".to_string()));
     }
@@ -170,7 +180,13 @@ mod tests {
         let store = MemoryStore::in_memory().unwrap();
         store.create_conversation("conv-tool").unwrap();
         store
-            .save_message("conv-tool", "tool", "file contents here", Some("call_0"))
+            .save_message(
+                "conv-tool",
+                "tool",
+                "file contents here",
+                Some("call_0"),
+                None,
+            )
             .unwrap();
 
         let messages = store.load_messages("conv-tool").unwrap();
@@ -207,7 +223,7 @@ mod tests {
         store.create_conversation("order-test").unwrap();
         for i in 0..10 {
             store
-                .save_message("order-test", "user", &format!("msg_{}", i), None)
+                .save_message("order-test", "user", &format!("msg_{}", i), None, None)
                 .unwrap();
         }
         let messages = store.load_messages("order-test").unwrap();
@@ -223,7 +239,7 @@ mod tests {
         store.create_conversation("large-test").unwrap();
         let large_content = "x".repeat(100_000);
         store
-            .save_message("large-test", "user", &large_content, None)
+            .save_message("large-test", "user", &large_content, None, None)
             .unwrap();
 
         let messages = store.load_messages("large-test").unwrap();
@@ -236,7 +252,7 @@ mod tests {
         store.create_conversation("special-chars").unwrap();
         let content = "Hello 'world' \"test\" \\ \n\t\r\0 日本語 🦀";
         store
-            .save_message("special-chars", "user", content, None)
+            .save_message("special-chars", "user", content, None, None)
             .unwrap();
 
         let messages = store.load_messages("special-chars").unwrap();
@@ -250,10 +266,10 @@ mod tests {
         store.create_conversation("conv-b").unwrap();
 
         store
-            .save_message("conv-a", "user", "message for A", None)
+            .save_message("conv-a", "user", "message for A", None, None)
             .unwrap();
         store
-            .save_message("conv-b", "user", "message for B", None)
+            .save_message("conv-b", "user", "message for B", None, None)
             .unwrap();
 
         let messages_a = store.load_messages("conv-a").unwrap();
@@ -271,10 +287,50 @@ mod tests {
         store.create_conversation("newer").unwrap();
 
         // Save message to "older" to make it the most recently updated
-        store.save_message("older", "user", "update", None).unwrap();
+        store
+            .save_message("older", "user", "update", None, None)
+            .unwrap();
 
         let latest = store.get_latest_conversation_id().unwrap().unwrap();
         assert_eq!(latest, "older");
+    }
+
+    #[test]
+    fn test_tool_calls_json_stored_and_loaded() {
+        let store = MemoryStore::in_memory().unwrap();
+        store.create_conversation("conv-tc").unwrap();
+
+        let tc_json = r#"[{"id":"call_0","name":"read_file","arguments":{"path":"src/main.rs"}}]"#;
+        store
+            .save_message("conv-tc", "assistant", "", None, Some(tc_json))
+            .unwrap();
+        store
+            .save_message("conv-tc", "tool", "file contents", Some("call_0"), None)
+            .unwrap();
+
+        let messages = store.load_messages("conv-tc").unwrap();
+        assert_eq!(messages.len(), 2);
+        // assistant message with tool_calls
+        assert_eq!(messages[0].0, "assistant");
+        assert_eq!(messages[0].3, Some(tc_json.to_string()));
+        // tool result
+        assert_eq!(messages[1].0, "tool");
+        assert_eq!(messages[1].2, Some("call_0".to_string()));
+        assert!(messages[1].3.is_none());
+    }
+
+    #[test]
+    fn test_tool_calls_null_backward_compat() {
+        let store = MemoryStore::in_memory().unwrap();
+        store.create_conversation("conv-bc").unwrap();
+        // Save without tool_calls (simulating old DB rows)
+        store
+            .save_message("conv-bc", "assistant", "hello", None, None)
+            .unwrap();
+
+        let messages = store.load_messages("conv-bc").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].3.is_none());
     }
 
     #[test]
@@ -287,7 +343,7 @@ mod tests {
             let store = MemoryStore::new(path).unwrap();
             store.create_conversation("persist-test").unwrap();
             store
-                .save_message("persist-test", "user", "persistent message", None)
+                .save_message("persist-test", "user", "persistent message", None, None)
                 .unwrap();
         }
 

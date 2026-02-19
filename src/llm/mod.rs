@@ -38,7 +38,7 @@ pub struct LlmResponse {
     pub tool_calls: Vec<ToolCall>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,

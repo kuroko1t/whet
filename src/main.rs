@@ -289,10 +289,41 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
                     println!("Resuming conversation: {}", id.dimmed());
                     // Load previous messages
                     if let Ok(messages) = store.load_messages(&id) {
-                        for (role, content, _tool_call_id) in &messages {
+                        let mut has_tool_messages = false;
+                        for (role, content, tool_call_id, tool_calls_json) in &messages {
                             match role.as_str() {
                                 "user" => agent.memory.push(llm::Message::user(content)),
-                                "assistant" => agent.memory.push(llm::Message::assistant(content)),
+                                "assistant" => {
+                                    if let Some(tc_json) = tool_calls_json {
+                                        if let Ok(tool_calls) =
+                                            serde_json::from_str::<Vec<llm::ToolCall>>(tc_json)
+                                        {
+                                            // Reconstruct read_paths
+                                            for tc in &tool_calls {
+                                                if tc.name == "read_file" {
+                                                    if let Some(p) = tc.arguments["path"].as_str() {
+                                                        agent.add_read_path(p);
+                                                    }
+                                                }
+                                            }
+                                            agent.memory.push(
+                                                llm::Message::assistant_with_tool_calls(tool_calls),
+                                            );
+                                        } else {
+                                            agent.memory.push(llm::Message::assistant(content));
+                                        }
+                                    } else {
+                                        agent.memory.push(llm::Message::assistant(content));
+                                    }
+                                }
+                                "tool" => {
+                                    if let Some(tc_id) = tool_call_id {
+                                        has_tool_messages = true;
+                                        agent
+                                            .memory
+                                            .push(llm::Message::tool_result(tc_id, content));
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -300,8 +331,12 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
                             "Loaded {} previous messages.\n",
                             messages.len().to_string().cyan()
                         );
+                        // Backward compat: if no tool messages were restored
+                        // (old DB without tool data), skip read-before-edit check
+                        if !has_tool_messages {
+                            agent.set_resumed(true);
+                        }
                     }
-                    agent.set_resumed(true);
                     conversation_created = true;
                     id
                 }
@@ -377,10 +412,13 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
 
                 // Save user message
                 if let Some(ref store) = store {
-                    if let Err(e) = store.save_message(&conversation_id, "user", input, None) {
+                    if let Err(e) = store.save_message(&conversation_id, "user", input, None, None)
+                    {
                         eprintln!("{} Failed to save message: {}", "Warning:".yellow(), e);
                     }
                 }
+
+                let memory_before = agent.memory.len();
 
                 let start = std::time::Instant::now();
                 let streaming = cfg.llm.streaming;
@@ -410,12 +448,22 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
                 println!("{}", format!("({:.1}s)", elapsed.as_secs_f64()).dimmed());
                 println!();
 
-                // Save assistant response
+                // Save all new messages (skip the user message at memory_before)
                 if let Some(ref store) = store {
-                    if let Err(e) =
-                        store.save_message(&conversation_id, "assistant", &response, None)
-                    {
-                        eprintln!("{} Failed to save message: {}", "Warning:".yellow(), e);
+                    for msg in &agent.memory[memory_before + 1..] {
+                        let role = msg.role.to_string();
+                        let tc_json = if msg.tool_calls.is_empty() {
+                            None
+                        } else {
+                            serde_json::to_string(&msg.tool_calls).ok()
+                        };
+                        let _ = store.save_message(
+                            &conversation_id,
+                            &role,
+                            &msg.content,
+                            msg.tool_call_id.as_deref(),
+                            tc_json.as_deref(),
+                        );
                     }
                 }
             }

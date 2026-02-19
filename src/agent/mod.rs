@@ -282,6 +282,11 @@ impl Agent {
         "Max iterations reached. The agent could not complete the task.".to_string()
     }
 
+    /// Add a path to the set of files that have been read (for read-before-edit tracking).
+    pub fn add_read_path(&mut self, path: &str) {
+        self.read_paths.insert(Self::normalize_tool_path(path));
+    }
+
     /// Normalize a tool path for read-before-edit tracking.
     /// Resolves "./src/main.rs" and "src/main.rs" to the same key.
     fn normalize_tool_path(path: &str) -> String {
