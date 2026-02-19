@@ -106,7 +106,7 @@ pub fn is_path_safe(path: &str) -> bool {
     // Case 1: The path itself is a symlink → check its target directly
     if expanded_path
         .symlink_metadata()
-        .map_or(false, |m| m.file_type().is_symlink())
+        .is_ok_and(|m| m.file_type().is_symlink())
     {
         if let Ok(target) = std::fs::read_link(expanded_path) {
             let target_str = target.display().to_string();
@@ -1179,7 +1179,7 @@ mod tests {
         // Skip if the OS can't detect the dangling symlink (some macOS configs)
         if !link_path
             .symlink_metadata()
-            .map_or(false, |m| m.file_type().is_symlink())
+            .is_ok_and(|m| m.file_type().is_symlink())
         {
             return;
         }
@@ -1228,7 +1228,7 @@ mod tests {
         std::os::unix::fs::symlink("/etc/shadow", &link_path).unwrap();
         if !link_path
             .symlink_metadata()
-            .map_or(false, |m| m.file_type().is_symlink())
+            .is_ok_and(|m| m.file_type().is_symlink())
         {
             return;
         }

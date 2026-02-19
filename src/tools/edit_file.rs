@@ -356,7 +356,7 @@ mod tests {
         std::os::unix::fs::symlink("/etc/shadow", &link_path).unwrap();
         if !link_path
             .symlink_metadata()
-            .map_or(false, |m| m.file_type().is_symlink())
+            .is_ok_and(|m| m.file_type().is_symlink())
         {
             return;
         }
