@@ -99,18 +99,39 @@ pub fn is_path_safe(path: &str) -> bool {
         }
     }
 
-    // Also check symlink target directly (handles dangling symlinks where
+    // Also check symlink targets directly (handles dangling symlinks where
     // canonicalize fails because the target doesn't exist, e.g. /etc/shadow on macOS).
-    if let Ok(target) = std::fs::read_link(&expanded) {
-        let target_expanded = if target.is_absolute() {
-            target
-        } else {
-            let parent = logical.parent().unwrap_or(&logical);
-            normalize_path(&parent.join(&target).display().to_string())
-        };
-        let target_str = target_expanded.display().to_string();
-        if !paths_to_check.contains(&target_str) {
-            paths_to_check.push(target_str);
+    // Check the path itself and each ancestor component for symlinks.
+    {
+        let logical_path = std::path::Path::new(&expanded);
+        let mut ancestors: Vec<std::path::PathBuf> = Vec::new();
+        ancestors.push(logical_path.to_path_buf());
+        let mut current = logical_path.to_path_buf();
+        while let Some(parent) = current.parent() {
+            if parent == current {
+                break;
+            }
+            ancestors.push(parent.to_path_buf());
+            current = parent.to_path_buf();
+        }
+        for ancestor in &ancestors {
+            if let Ok(target) = std::fs::read_link(ancestor) {
+                let resolved = if target.is_absolute() {
+                    target.clone()
+                } else {
+                    let parent = ancestor.parent().unwrap_or(ancestor);
+                    normalize_path(&parent.join(&target).display().to_string())
+                };
+                // Reconstruct full path: replace the symlink component with its target
+                let suffix = logical_path
+                    .strip_prefix(ancestor)
+                    .unwrap_or(std::path::Path::new(""));
+                let resolved_full = resolved.join(suffix);
+                let resolved_str = resolved_full.display().to_string();
+                if !paths_to_check.contains(&resolved_str) {
+                    paths_to_check.push(resolved_str);
+                }
+            }
         }
     }
 
