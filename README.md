@@ -134,6 +134,18 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 | `accept_edits` | Auto | Auto | **Ask** |
 | `yolo` | Auto | Auto | Auto |
 
+### Session Management
+
+Conversations are saved per working directory and can be resumed later.
+
+| Flag | Short | Description |
+|---|---|---|
+| `--resume` | `-r` | Interactive session picker for the current directory |
+| `--resume <id>` | `-r <id>` | Resume a specific session by ID |
+| `--continue` | `-c` | Resume the most recent session in the current directory |
+
+When resuming, previous user/assistant messages are displayed so you can see the conversation context at a glance.
+
 ### Context Compression
 
 Automatic conversation summarization prevents unbounded memory growth. Use `/compact` for manual compression.
@@ -236,7 +248,9 @@ Skills are injected into the system prompt automatically. Use `/skills` to list 
 whet                             # start interactive chat
 whet "fix the bug"               # single-shot mode
 whet -m llama3.2:3b              # use a specific model
-whet --continue                  # resume last conversation
+whet --resume                    # pick a session to resume (current directory)
+whet --resume <id>               # resume a specific session by ID
+whet --continue                  # resume the most recent session
 whet -p "explain main.rs"        # single-shot via -p flag
 whet -y                          # skip all permission prompts
 whet tools                       # list available tools
@@ -254,6 +268,7 @@ whet config                      # show current configuration
 | Project instructions | `WHET.md` | `CLAUDE.md` |
 | MCP support | Yes | Yes |
 | Permission system | 3 modes | Yes |
+| Session management | `--resume` / `--continue` | `--resume` / `--continue` |
 | Context compression | Yes (auto + manual) | Yes |
 
 ## Architecture
