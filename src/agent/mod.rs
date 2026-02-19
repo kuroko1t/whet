@@ -18,6 +18,8 @@ pub struct Agent {
     pub config: AgentConfig,
     /// Tracks paths that have been read via read_file, used to enforce read-before-edit.
     read_paths: HashSet<String>,
+    /// When true, skip the read-before-edit check (resumed sessions lack tool call history).
+    resumed: bool,
 }
 
 pub struct AgentConfig {
@@ -55,7 +57,12 @@ impl Agent {
             memory,
             config,
             read_paths: HashSet::new(),
+            resumed: false,
         }
+    }
+
+    pub fn set_resumed(&mut self, resumed: bool) {
+        self.resumed = resumed;
     }
 
     #[allow(dead_code)]
@@ -205,8 +212,8 @@ impl Agent {
                     }
                 }
 
-                let needs_read_first = (tool_call.name == "edit_file"
-                    || tool_call.name == "apply_diff")
+                let needs_read_first = !self.resumed
+                    && (tool_call.name == "edit_file" || tool_call.name == "apply_diff")
                     && tool_call.arguments["path"].as_str().map_or(true, |p| {
                         !self.read_paths.contains(&Self::normalize_tool_path(p))
                     });
@@ -1530,6 +1537,82 @@ mod tests {
             !tool_result.content.contains("Warning"),
             "write_file should not require prior read, got: {}",
             tool_result.content
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    // --- Resumed session tests ---
+
+    #[test]
+    fn test_resumed_edit_file_skips_read_before_edit_warning() {
+        let path = "/tmp/whet_test_resumed_edit.txt";
+        std::fs::write(path, "hello world").unwrap();
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "edit_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": path,
+                        "old_text": "hello",
+                        "new_text": "hi"
+                    }),
+                }],
+            },
+            LlmResponse {
+                content: Some("Edited.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        agent.set_resumed(true);
+        let response = agent.process_message("Edit the file");
+        assert_eq!(response, "Edited.");
+
+        let tool_result = agent
+            .memory
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("Should have tool result");
+        assert!(
+            !tool_result.content.contains("Warning"),
+            "resumed session should skip read-before-edit, got: {}",
+            tool_result.content
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_resumed_session_still_tracks_read_paths() {
+        let path = "/tmp/whet_test_resumed_track.txt";
+        std::fs::write(path, "content").unwrap();
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": path}),
+                }],
+            },
+            LlmResponse {
+                content: Some("Read.".to_string()),
+                tool_calls: vec![],
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        agent.set_resumed(true);
+        agent.process_message("Read the file");
+
+        let normalized = Agent::normalize_tool_path(path);
+        assert!(
+            agent.read_paths.contains(&normalized),
+            "resumed session should still track read_file calls"
         );
 
         std::fs::remove_file(path).ok();

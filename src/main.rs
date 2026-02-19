@@ -74,9 +74,9 @@ struct Cli {
     #[arg(short, long)]
     model: Option<String>,
 
-    /// Continue the last conversation
-    #[arg(long, short = 'c')]
-    r#continue: bool,
+    /// Resume the last conversation
+    #[arg(long, short = 'r')]
+    resume: bool,
 
     /// Force a new conversation (default)
     #[arg(long)]
@@ -301,6 +301,7 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
                             messages.len().to_string().cyan()
                         );
                     }
+                    agent.set_resumed(true);
                     conversation_created = true;
                     id
                 }
@@ -761,7 +762,7 @@ fn main() {
             } else {
                 Some(prompt_text)
             });
-            run_chat(cli.model, cli.r#continue, message, cli.yolo);
+            run_chat(cli.model, cli.resume, message, cli.yolo);
         }
     }
 }
