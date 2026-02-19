@@ -99,6 +99,21 @@ pub fn is_path_safe(path: &str) -> bool {
         }
     }
 
+    // Also check symlink target directly (handles dangling symlinks where
+    // canonicalize fails because the target doesn't exist, e.g. /etc/shadow on macOS).
+    if let Ok(target) = std::fs::read_link(&expanded) {
+        let target_expanded = if target.is_absolute() {
+            target
+        } else {
+            let parent = logical.parent().unwrap_or(&logical);
+            normalize_path(&parent.join(&target).display().to_string())
+        };
+        let target_str = target_expanded.display().to_string();
+        if !paths_to_check.contains(&target_str) {
+            paths_to_check.push(target_str);
+        }
+    }
+
     for path_str in &paths_to_check {
         // Block exact sensitive paths
         for sensitive in &sensitive_paths {
