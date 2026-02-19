@@ -394,7 +394,14 @@ fn run_chat(
                 let mut has_tool_messages = false;
                 for (role, content, tool_call_id, tool_calls_json) in &messages {
                     match role.as_str() {
-                        "user" => agent.memory.push(llm::Message::user(content)),
+                        "user" => {
+                            agent.memory.push(llm::Message::user(content));
+                            println!(
+                                "{} {}",
+                                "you>".blue().bold(),
+                                truncate_str(content, 200).dimmed()
+                            );
+                        }
                         "assistant" => {
                             if let Some(tc_json) = tool_calls_json {
                                 if let Ok(tool_calls) =
@@ -417,6 +424,13 @@ fn run_chat(
                             } else {
                                 agent.memory.push(llm::Message::assistant(content));
                             }
+                            if !content.is_empty() {
+                                println!(
+                                    "{} {}",
+                                    "bot>".green().bold(),
+                                    truncate_str(content, 200).dimmed()
+                                );
+                            }
                         }
                         "tool" => {
                             if let Some(tc_id) = tool_call_id {
@@ -428,8 +442,8 @@ fn run_chat(
                     }
                 }
                 println!(
-                    "Loaded {} previous messages.\n",
-                    messages.len().to_string().cyan()
+                    "\n{}\n",
+                    format!("Restored {} messages.", messages.len()).dimmed()
                 );
                 // Backward compat: if no tool messages were restored
                 // (old DB without tool data), skip read-before-edit check
