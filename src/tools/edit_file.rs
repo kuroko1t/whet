@@ -354,6 +354,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let link_path = dir.path().join("edit_shadow_link");
         std::os::unix::fs::symlink("/etc/shadow", &link_path).unwrap();
+        if !link_path
+            .symlink_metadata()
+            .map_or(false, |m| m.file_type().is_symlink())
+        {
+            return;
+        }
 
         let tool = EditFileTool;
         let result = tool.execute(json!({
