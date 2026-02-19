@@ -180,35 +180,32 @@ mod tests {
 
     #[test]
     fn test_read_via_symlink_to_sensitive_blocked() {
-        let link_path = "/tmp/whet_test_read_symlink";
-        std::fs::remove_file(link_path).ok();
-        std::os::unix::fs::symlink("/etc/shadow", link_path).ok();
+        let dir = tempfile::TempDir::new().unwrap();
+        let link_path = dir.path().join("read_shadow_link");
+        std::os::unix::fs::symlink("/etc/shadow", &link_path).unwrap();
 
         let tool = ReadFileTool;
-        let result = tool.execute(json!({"path": link_path}));
+        let result = tool.execute(json!({"path": link_path.display().to_string()}));
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
             ToolError::PermissionDenied(_)
         ));
-
-        std::fs::remove_file(link_path).ok();
     }
 
     #[test]
     fn test_read_via_symlink_to_safe_allowed() {
-        let target = "/tmp/whet_test_read_symlink_target.txt";
-        let link_path = "/tmp/whet_test_read_symlink_safe";
-        std::fs::write(target, "safe content via symlink").unwrap();
-        std::fs::remove_file(link_path).ok();
-        std::os::unix::fs::symlink(target, link_path).ok();
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("read_target.txt");
+        let link_path = dir.path().join("read_safe_link");
+        std::fs::write(&target, "safe content via symlink").unwrap();
+        std::os::unix::fs::symlink(&target, &link_path).unwrap();
 
         let tool = ReadFileTool;
-        let result = tool.execute(json!({"path": link_path})).unwrap();
+        let result = tool
+            .execute(json!({"path": link_path.display().to_string()}))
+            .unwrap();
         assert_eq!(result, "safe content via symlink");
-
-        std::fs::remove_file(link_path).ok();
-        std::fs::remove_file(target).ok();
     }
 
     #[test]

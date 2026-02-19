@@ -351,13 +351,13 @@ mod tests {
 
     #[test]
     fn test_edit_file_via_symlink_to_sensitive_blocked() {
-        let link_path = "/tmp/whet_test_edit_symlink";
-        fs::remove_file(link_path).ok();
-        std::os::unix::fs::symlink("/etc/shadow", link_path).ok();
+        let dir = tempfile::TempDir::new().unwrap();
+        let link_path = dir.path().join("edit_shadow_link");
+        std::os::unix::fs::symlink("/etc/shadow", &link_path).unwrap();
 
         let tool = EditFileTool;
         let result = tool.execute(json!({
-            "path": link_path,
+            "path": link_path.display().to_string(),
             "old_text": "root",
             "new_text": "hacked"
         }));
@@ -366,33 +366,31 @@ mod tests {
             result.unwrap_err(),
             ToolError::PermissionDenied(_)
         ));
-
-        fs::remove_file(link_path).ok();
     }
 
     #[test]
     fn test_edit_file_via_symlink_to_safe_allowed() {
-        let target = "/tmp/whet_test_edit_symlink_target.txt";
-        let link_path = "/tmp/whet_test_edit_symlink_safe";
-        fs::remove_file(link_path).ok();
-        setup_test_file(target, "Hello World\nGoodbye World\n");
-        std::os::unix::fs::symlink(target, link_path).ok();
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("edit_target.txt");
+        let link_path = dir.path().join("edit_safe_link");
+        setup_test_file(
+            &target.display().to_string(),
+            "Hello World\nGoodbye World\n",
+        );
+        std::os::unix::fs::symlink(&target, &link_path).unwrap();
 
         let tool = EditFileTool;
         let result = tool
             .execute(json!({
-                "path": link_path,
+                "path": link_path.display().to_string(),
                 "old_text": "Hello World",
                 "new_text": "Hi World"
             }))
             .unwrap();
         assert!(result.contains("Successfully edited"));
 
-        let content = fs::read_to_string(target).unwrap();
+        let content = fs::read_to_string(&target).unwrap();
         assert!(content.contains("Hi World"));
-
-        fs::remove_file(link_path).ok();
-        cleanup(target);
     }
 
     #[test]

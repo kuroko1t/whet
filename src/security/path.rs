@@ -1178,62 +1178,53 @@ mod tests {
 
     #[test]
     fn test_symlink_to_sensitive_path_blocked() {
-        let link_path = "/tmp/whet_test_symlink_shadow";
-        // Clean up from previous runs
-        std::fs::remove_file(link_path).ok();
-        // Create a symlink pointing to /etc/shadow
-        std::os::unix::fs::symlink("/etc/shadow", link_path).ok();
-        // is_path_safe should resolve the symlink and block it
+        let dir = tempfile::TempDir::new().unwrap();
+        let link_path = dir.path().join("shadow_link");
+        std::os::unix::fs::symlink("/etc/shadow", &link_path).unwrap();
         assert!(
-            !is_path_safe(link_path),
+            !is_path_safe(&link_path.display().to_string()),
             "Symlink to /etc/shadow should be blocked"
         );
-        std::fs::remove_file(link_path).ok();
     }
 
     #[test]
     fn test_symlink_to_ssh_dir_blocked() {
-        let link_path = "/tmp/whet_test_symlink_ssh";
-        std::fs::remove_file(link_path).ok();
         if let Some(home) = dirs::home_dir() {
-            let ssh_dir = format!("{}/.ssh", home.display());
-            if std::path::Path::new(&ssh_dir).exists() {
-                std::os::unix::fs::symlink(&ssh_dir, link_path).ok();
-                // Accessing a file through the symlink should be blocked
-                let test_path = format!("{}/id_rsa", link_path);
+            let ssh_dir = home.join(".ssh");
+            if ssh_dir.exists() {
+                let dir = tempfile::TempDir::new().unwrap();
+                let link_path = dir.path().join("ssh_link");
+                std::os::unix::fs::symlink(&ssh_dir, &link_path).unwrap();
+                let test_path = link_path.join("id_rsa");
                 assert!(
-                    !is_path_safe(&test_path),
+                    !is_path_safe(&test_path.display().to_string()),
                     "Symlink to ~/.ssh should be blocked"
                 );
             }
         }
-        std::fs::remove_file(link_path).ok();
     }
 
     #[test]
     fn test_symlink_to_safe_path_allowed() {
-        let link_path = "/tmp/whet_test_symlink_safe";
-        let target = "/tmp/whet_test_symlink_target.txt";
-        std::fs::remove_file(link_path).ok();
-        std::fs::write(target, "safe content").ok();
-        std::os::unix::fs::symlink(target, link_path).ok();
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("safe_target.txt");
+        std::fs::write(&target, "safe content").unwrap();
+        let link_path = dir.path().join("safe_link");
+        std::os::unix::fs::symlink(&target, &link_path).unwrap();
         assert!(
-            is_path_safe(link_path),
+            is_path_safe(&link_path.display().to_string()),
             "Symlink to safe path should be allowed"
         );
-        std::fs::remove_file(link_path).ok();
-        std::fs::remove_file(target).ok();
     }
 
     // -- read_file/write_file symlink tests via tool integration --
 
     #[test]
     fn test_command_blocks_cat_via_symlink() {
-        let link_path = "/tmp/whet_test_symlink_cat";
-        std::fs::remove_file(link_path).ok();
-        std::os::unix::fs::symlink("/etc/shadow", link_path).ok();
-        assert!(check_command_safety(&format!("cat {}", link_path)).is_err());
-        std::fs::remove_file(link_path).ok();
+        let dir = tempfile::TempDir::new().unwrap();
+        let link_path = dir.path().join("cat_link");
+        std::os::unix::fs::symlink("/etc/shadow", &link_path).unwrap();
+        assert!(check_command_safety(&format!("cat {}", link_path.display())).is_err());
     }
 
     // -- redirect within chain tests --
