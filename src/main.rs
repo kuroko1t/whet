@@ -545,7 +545,7 @@ fn run_chat(
 
                 let start = std::time::Instant::now();
                 let streaming = cfg.llm.streaming;
-                let response = if streaming {
+                let _response = if streaming {
                     eprint!("{} ", "bot>".green().bold());
                     let response = agent.process_message_with_callbacks(
                         input,
