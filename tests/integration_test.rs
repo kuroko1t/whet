@@ -38,6 +38,16 @@ mod mcp_e2e {
             .unwrap_or(false)
     }
 
+    /// Get canonicalized path from TempDir.
+    /// On macOS, /var → /private/var symlink causes MCP server path mismatch
+    /// unless we canonicalize first.
+    fn canonical_temp_dir(dir: &tempfile::TempDir) -> String {
+        std::fs::canonicalize(dir.path())
+            .unwrap_or_else(|_| dir.path().to_path_buf())
+            .to_string_lossy()
+            .to_string()
+    }
+
     #[test]
     fn test_mcp_filesystem_server_connect_and_list_tools() {
         if !has_npx() {
@@ -46,7 +56,7 @@ mod mcp_e2e {
         }
 
         let test_dir = tempfile::TempDir::new().unwrap();
-        let test_dir_path = test_dir.path().to_string_lossy().to_string();
+        let test_dir_path = canonical_temp_dir(&test_dir);
 
         let mut registry = ToolRegistry::new();
         let servers = vec![McpServerConfig {
@@ -112,7 +122,7 @@ mod mcp_e2e {
         }
 
         let test_dir = tempfile::TempDir::new().unwrap();
-        let test_dir_path = test_dir.path().to_string_lossy().to_string();
+        let test_dir_path = canonical_temp_dir(&test_dir);
 
         let mut registry = ToolRegistry::new();
         let servers = vec![McpServerConfig {
@@ -177,7 +187,7 @@ mod mcp_e2e {
         }
 
         let test_dir = tempfile::TempDir::new().unwrap();
-        let test_dir_path = test_dir.path().to_string_lossy().to_string();
+        let test_dir_path = canonical_temp_dir(&test_dir);
 
         // Create test files
         std::fs::write(format!("{}/file_a.txt", test_dir_path), "content a").unwrap();
@@ -232,7 +242,7 @@ mod mcp_e2e {
         }
 
         let test_dir = tempfile::TempDir::new().unwrap();
-        let test_dir_path = test_dir.path().to_string_lossy().to_string();
+        let test_dir_path = canonical_temp_dir(&test_dir);
 
         let mut registry = ToolRegistry::new();
         let servers = vec![McpServerConfig {
