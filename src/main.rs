@@ -74,13 +74,13 @@ struct Cli {
     #[arg(short, long)]
     model: Option<String>,
 
-    /// Resume the last conversation
-    #[arg(long, short = 'r')]
-    resume: bool,
+    /// Resume a previous conversation (optional: session ID)
+    #[arg(long, short = 'r', num_args = 0..=1, default_missing_value = "")]
+    resume: Option<String>,
 
-    /// Force a new conversation (default)
-    #[arg(long)]
-    new: bool,
+    /// Continue the most recent conversation
+    #[arg(long, short = 'c')]
+    continue_conv: bool,
 
     /// Single-shot mode: send a message and exit
     #[arg(short = 'p', long = "prompt")]
@@ -211,7 +211,89 @@ fn setup_agent(cfg: &Config, model: &str, skills: &[Skill], yolo: bool) -> Agent
     Agent::new(provider, registry, agent_config, skills)
 }
 
-fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>, yolo: bool) {
+fn pick_session(store: &MemoryStore, working_dir: &str) -> Option<String> {
+    let convs = match store.list_conversations(working_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "{} Failed to list conversations: {}",
+                "Warning:".yellow(),
+                e
+            );
+            return None;
+        }
+    };
+    if convs.is_empty() {
+        println!("No previous sessions found in this directory.");
+        return None;
+    }
+
+    let items: Vec<String> = convs
+        .iter()
+        .map(|c| {
+            let title = c.title.as_deref().unwrap_or("(untitled)");
+            let ago = format_time_ago(&c.updated_at);
+            format!(
+                "{:<50} {:>15}   {} messages",
+                truncate_str(title, 50),
+                ago,
+                c.message_count
+            )
+        })
+        .collect();
+
+    println!("\n  {}\n", "Resuming conversation".bold());
+
+    let selection = dialoguer::Select::new()
+        .items(&items)
+        .default(0)
+        .interact_opt();
+
+    match selection {
+        Ok(Some(idx)) => Some(convs[idx].id.clone()),
+        _ => None,
+    }
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let mut end = max_len.saturating_sub(3);
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
+}
+
+fn format_time_ago(rfc3339: &str) -> String {
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
+        return rfc3339.to_string();
+    };
+    let now = chrono::Utc::now();
+    let dur = now.signed_duration_since(dt);
+
+    if dur.num_minutes() < 1 {
+        "just now".to_string()
+    } else if dur.num_minutes() < 60 {
+        format!("{} min ago", dur.num_minutes())
+    } else if dur.num_hours() < 24 {
+        let h = dur.num_hours();
+        format!("{} hour{} ago", h, if h == 1 { "" } else { "s" })
+    } else {
+        let d = dur.num_days();
+        format!("{} day{} ago", d, if d == 1 { "" } else { "s" })
+    }
+}
+
+fn run_chat(
+    model: Option<String>,
+    resume: Option<String>,
+    continue_conv: bool,
+    message: Option<String>,
+    yolo: bool,
+) {
     let cfg = Config::load();
     let model = model.unwrap_or(cfg.llm.model.clone());
     let loaded_skills = skills::load_skills(&cfg.agent.skills_dir);
@@ -281,76 +363,93 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
         }
     };
 
+    let working_dir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Determine which conversation to load
+    let resume_id: Option<String> = if let Some(ref resume_arg) = resume {
+        if resume_arg.is_empty() {
+            // --resume (no arg) → picker
+            store.as_ref().and_then(|s| pick_session(s, &working_dir))
+        } else {
+            // --resume <id> → direct
+            Some(resume_arg.clone())
+        }
+    } else if continue_conv {
+        // --continue → latest
+        store
+            .as_ref()
+            .and_then(|s| s.get_latest_conversation_id(&working_dir).ok().flatten())
+    } else {
+        None
+    };
+
     let mut conversation_created = false;
-    let conversation_id = if continue_conv {
+    let conversation_id = if let Some(id) = resume_id {
         if let Some(ref store) = store {
-            match store.get_latest_conversation_id() {
-                Ok(Some(id)) => {
-                    println!("Resuming conversation: {}", id.dimmed());
-                    // Load previous messages
-                    if let Ok(messages) = store.load_messages(&id) {
-                        let mut has_tool_messages = false;
-                        for (role, content, tool_call_id, tool_calls_json) in &messages {
-                            match role.as_str() {
-                                "user" => agent.memory.push(llm::Message::user(content)),
-                                "assistant" => {
-                                    if let Some(tc_json) = tool_calls_json {
-                                        if let Ok(tool_calls) =
-                                            serde_json::from_str::<Vec<llm::ToolCall>>(tc_json)
-                                        {
-                                            // Reconstruct read_paths
-                                            for tc in &tool_calls {
-                                                if tc.name == "read_file" {
-                                                    if let Some(p) = tc.arguments["path"].as_str() {
-                                                        agent.add_read_path(p);
-                                                    }
-                                                }
+            println!("Resuming conversation: {}", id.dimmed());
+            // Load previous messages
+            if let Ok(messages) = store.load_messages(&id) {
+                let mut has_tool_messages = false;
+                for (role, content, tool_call_id, tool_calls_json) in &messages {
+                    match role.as_str() {
+                        "user" => agent.memory.push(llm::Message::user(content)),
+                        "assistant" => {
+                            if let Some(tc_json) = tool_calls_json {
+                                if let Ok(tool_calls) =
+                                    serde_json::from_str::<Vec<llm::ToolCall>>(tc_json)
+                                {
+                                    // Reconstruct read_paths
+                                    for tc in &tool_calls {
+                                        if tc.name == "read_file" {
+                                            if let Some(p) = tc.arguments["path"].as_str() {
+                                                agent.add_read_path(p);
                                             }
-                                            agent.memory.push(
-                                                llm::Message::assistant_with_tool_calls(tool_calls),
-                                            );
-                                        } else {
-                                            agent.memory.push(llm::Message::assistant(content));
                                         }
-                                    } else {
-                                        agent.memory.push(llm::Message::assistant(content));
                                     }
+                                    agent
+                                        .memory
+                                        .push(llm::Message::assistant_with_tool_calls(tool_calls));
+                                } else {
+                                    agent.memory.push(llm::Message::assistant(content));
                                 }
-                                "tool" => {
-                                    if let Some(tc_id) = tool_call_id {
-                                        has_tool_messages = true;
-                                        agent
-                                            .memory
-                                            .push(llm::Message::tool_result(tc_id, content));
-                                    }
-                                }
-                                _ => {}
+                            } else {
+                                agent.memory.push(llm::Message::assistant(content));
                             }
                         }
-                        println!(
-                            "Loaded {} previous messages.\n",
-                            messages.len().to_string().cyan()
-                        );
-                        // Backward compat: if no tool messages were restored
-                        // (old DB without tool data), skip read-before-edit check
-                        if !has_tool_messages {
-                            agent.set_resumed(true);
+                        "tool" => {
+                            if let Some(tc_id) = tool_call_id {
+                                has_tool_messages = true;
+                                agent.memory.push(llm::Message::tool_result(tc_id, content));
+                            }
                         }
+                        _ => {}
                     }
-                    conversation_created = true;
-                    id
                 }
-                _ => {
-                    println!("No previous conversation found. Starting new.\n");
-                    uuid::Uuid::new_v4().to_string()
+                println!(
+                    "Loaded {} previous messages.\n",
+                    messages.len().to_string().cyan()
+                );
+                // Backward compat: if no tool messages were restored
+                // (old DB without tool data), skip read-before-edit check
+                if !has_tool_messages {
+                    agent.set_resumed(true);
                 }
             }
+            conversation_created = true;
+            id
         } else {
             uuid::Uuid::new_v4().to_string()
         }
     } else {
+        if resume.is_some() || continue_conv {
+            println!("No previous conversation found. Starting new.\n");
+        }
         uuid::Uuid::new_v4().to_string()
     };
+    // Track whether title has already been set (true for resumed conversations)
+    let mut title_set = conversation_created;
 
     let mut current_model = model;
     let mut rl = match rustyline::DefaultEditor::new() {
@@ -399,7 +498,7 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
                 // Create conversation lazily on first message
                 if !conversation_created {
                     if let Some(ref store) = store {
-                        if let Err(e) = store.create_conversation(&conversation_id) {
+                        if let Err(e) = store.create_conversation(&conversation_id, &working_dir) {
                             eprintln!(
                                 "{} Failed to create conversation: {}",
                                 "Warning:".yellow(),
@@ -415,6 +514,16 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
                     if let Err(e) = store.save_message(&conversation_id, "user", input, None, None)
                     {
                         eprintln!("{} Failed to save message: {}", "Warning:".yellow(), e);
+                    }
+                    // Auto-set title from first user message
+                    if !title_set {
+                        let title_len = input.len().min(50);
+                        let mut end = title_len;
+                        while end > 0 && !input.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        let _ = store.update_conversation_title(&conversation_id, &input[..end]);
+                        title_set = true;
                     }
                 }
 
@@ -810,7 +919,7 @@ fn main() {
             } else {
                 Some(prompt_text)
             });
-            run_chat(cli.model, cli.resume, message, cli.yolo);
+            run_chat(cli.model, cli.resume, cli.continue_conv, message, cli.yolo);
         }
     }
 }

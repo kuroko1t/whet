@@ -1,5 +1,12 @@
 use rusqlite::{params, Connection, Result as SqliteResult};
 
+pub struct ConversationSummary {
+    pub id: String,
+    pub title: Option<String>,
+    pub updated_at: String,
+    pub message_count: usize,
+}
+
 pub struct MemoryStore {
     conn: Connection,
 }
@@ -47,6 +54,8 @@ impl MemoryStore {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
+                working_dir TEXT,
+                title TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -61,18 +70,24 @@ impl MemoryStore {
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id)
             );",
         )?;
-        // Migration: add tool_calls column for existing databases
+        // Migrations for existing databases
         let _ = self
             .conn
             .execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE conversations ADD COLUMN working_dir TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE conversations ADD COLUMN title TEXT", []);
         Ok(())
     }
 
-    pub fn create_conversation(&self, id: &str) -> SqliteResult<()> {
+    pub fn create_conversation(&self, id: &str, working_dir: &str) -> SqliteResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO conversations (id, created_at, updated_at) VALUES (?1, ?2, ?3)",
-            params![id, now, now],
+            "INSERT INTO conversations (id, working_dir, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, working_dir, now, now],
         )?;
         Ok(())
     }
@@ -119,18 +134,48 @@ impl MemoryStore {
         rows.collect()
     }
 
-    pub fn get_latest_conversation_id(&self) -> SqliteResult<Option<String>> {
+    pub fn get_latest_conversation_id(&self, working_dir: &str) -> SqliteResult<Option<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id FROM conversations c
-             WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+             WHERE (c.working_dir = ?1 OR c.working_dir IS NULL)
+               AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
              ORDER BY c.updated_at DESC LIMIT 1",
         )?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query(params![working_dir])?;
         if let Some(row) = rows.next()? {
             Ok(Some(row.get(0)?))
         } else {
             Ok(None)
         }
+    }
+
+    pub fn update_conversation_title(&self, id: &str, title: &str) -> SqliteResult<()> {
+        self.conn.execute(
+            "UPDATE conversations SET title = ?1 WHERE id = ?2",
+            params![title, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_conversations(&self, working_dir: &str) -> SqliteResult<Vec<ConversationSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.title, c.updated_at, COUNT(m.id) as msg_count
+             FROM conversations c
+             JOIN messages m ON m.conversation_id = c.id
+             WHERE c.working_dir = ?1 OR c.working_dir IS NULL
+             GROUP BY c.id
+             HAVING msg_count > 0
+             ORDER BY c.updated_at DESC",
+        )?;
+        let rows = stmt.query_map(params![working_dir], |row| {
+            Ok(ConversationSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                updated_at: row.get(2)?,
+                message_count: row.get::<_, i64>(3)? as usize,
+            })
+        })?;
+        rows.collect()
     }
 }
 
@@ -141,7 +186,7 @@ mod tests {
     #[test]
     fn test_create_and_load_conversation() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("test-conv-1").unwrap();
+        store.create_conversation("test-conv-1", "/tmp").unwrap();
         store
             .save_message("test-conv-1", "user", "Hello", None, None)
             .unwrap();
@@ -160,25 +205,50 @@ mod tests {
     #[test]
     fn test_get_latest_conversation() {
         let store = MemoryStore::in_memory().unwrap();
-        assert!(store.get_latest_conversation_id().unwrap().is_none());
+        assert!(store.get_latest_conversation_id("/tmp").unwrap().is_none());
 
         // Empty conversations should not be returned
-        store.create_conversation("conv-1").unwrap();
-        store.create_conversation("conv-2").unwrap();
-        assert!(store.get_latest_conversation_id().unwrap().is_none());
+        store.create_conversation("conv-1", "/tmp").unwrap();
+        store.create_conversation("conv-2", "/tmp").unwrap();
+        assert!(store.get_latest_conversation_id("/tmp").unwrap().is_none());
 
         // Only conversations with messages should be returned
         store
             .save_message("conv-1", "user", "hello", None, None)
             .unwrap();
-        let latest = store.get_latest_conversation_id().unwrap();
+        let latest = store.get_latest_conversation_id("/tmp").unwrap();
         assert_eq!(latest, Some("conv-1".to_string()));
+    }
+
+    #[test]
+    fn test_get_latest_conversation_filters_by_dir() {
+        let store = MemoryStore::in_memory().unwrap();
+        store.create_conversation("conv-a", "/project-a").unwrap();
+        store.create_conversation("conv-b", "/project-b").unwrap();
+        store
+            .save_message("conv-a", "user", "hello from A", None, None)
+            .unwrap();
+        store
+            .save_message("conv-b", "user", "hello from B", None, None)
+            .unwrap();
+
+        let latest_a = store.get_latest_conversation_id("/project-a").unwrap();
+        assert_eq!(latest_a, Some("conv-a".to_string()));
+
+        let latest_b = store.get_latest_conversation_id("/project-b").unwrap();
+        assert_eq!(latest_b, Some("conv-b".to_string()));
+
+        // No conversations for unknown dir
+        assert!(store
+            .get_latest_conversation_id("/unknown")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn test_tool_call_id_stored() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("conv-tool").unwrap();
+        store.create_conversation("conv-tool", "/tmp").unwrap();
         store
             .save_message(
                 "conv-tool",
@@ -197,7 +267,7 @@ mod tests {
     #[test]
     fn test_load_empty_conversation() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("empty-conv").unwrap();
+        store.create_conversation("empty-conv", "/tmp").unwrap();
         let messages = store.load_messages("empty-conv").unwrap();
         assert!(messages.is_empty());
     }
@@ -212,15 +282,15 @@ mod tests {
     #[test]
     fn test_duplicate_conversation_id_fails() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("dup-id").unwrap();
-        let result = store.create_conversation("dup-id");
+        store.create_conversation("dup-id", "/tmp").unwrap();
+        let result = store.create_conversation("dup-id", "/tmp");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_message_ordering_preserved() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("order-test").unwrap();
+        store.create_conversation("order-test", "/tmp").unwrap();
         for i in 0..10 {
             store
                 .save_message("order-test", "user", &format!("msg_{}", i), None, None)
@@ -236,7 +306,7 @@ mod tests {
     #[test]
     fn test_large_content_stored() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("large-test").unwrap();
+        store.create_conversation("large-test", "/tmp").unwrap();
         let large_content = "x".repeat(100_000);
         store
             .save_message("large-test", "user", &large_content, None, None)
@@ -249,7 +319,7 @@ mod tests {
     #[test]
     fn test_special_characters_in_content() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("special-chars").unwrap();
+        store.create_conversation("special-chars", "/tmp").unwrap();
         let content = "Hello 'world' \"test\" \\ \n\t\r\0 日本語 🦀";
         store
             .save_message("special-chars", "user", content, None, None)
@@ -262,8 +332,8 @@ mod tests {
     #[test]
     fn test_multiple_conversations_isolated() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("conv-a").unwrap();
-        store.create_conversation("conv-b").unwrap();
+        store.create_conversation("conv-a", "/tmp").unwrap();
+        store.create_conversation("conv-b", "/tmp").unwrap();
 
         store
             .save_message("conv-a", "user", "message for A", None, None)
@@ -283,22 +353,22 @@ mod tests {
     #[test]
     fn test_latest_conversation_updated_on_message() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("older").unwrap();
-        store.create_conversation("newer").unwrap();
+        store.create_conversation("older", "/tmp").unwrap();
+        store.create_conversation("newer", "/tmp").unwrap();
 
         // Save message to "older" to make it the most recently updated
         store
             .save_message("older", "user", "update", None, None)
             .unwrap();
 
-        let latest = store.get_latest_conversation_id().unwrap().unwrap();
+        let latest = store.get_latest_conversation_id("/tmp").unwrap().unwrap();
         assert_eq!(latest, "older");
     }
 
     #[test]
     fn test_tool_calls_json_stored_and_loaded() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("conv-tc").unwrap();
+        store.create_conversation("conv-tc", "/tmp").unwrap();
 
         let tc_json = r#"[{"id":"call_0","name":"read_file","arguments":{"path":"src/main.rs"}}]"#;
         store
@@ -322,7 +392,7 @@ mod tests {
     #[test]
     fn test_tool_calls_null_backward_compat() {
         let store = MemoryStore::in_memory().unwrap();
-        store.create_conversation("conv-bc").unwrap();
+        store.create_conversation("conv-bc", "/tmp").unwrap();
         // Save without tool_calls (simulating old DB rows)
         store
             .save_message("conv-bc", "assistant", "hello", None, None)
@@ -341,7 +411,7 @@ mod tests {
 
         {
             let store = MemoryStore::new(path).unwrap();
-            store.create_conversation("persist-test").unwrap();
+            store.create_conversation("persist-test", "/tmp").unwrap();
             store
                 .save_message("persist-test", "user", "persistent message", None, None)
                 .unwrap();
@@ -356,5 +426,92 @@ mod tests {
         }
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_list_conversations() {
+        let store = MemoryStore::in_memory().unwrap();
+        store.create_conversation("conv-1", "/project").unwrap();
+        store.create_conversation("conv-2", "/project").unwrap();
+        store.create_conversation("conv-3", "/other").unwrap();
+
+        // conv-1: has messages
+        store
+            .save_message("conv-1", "user", "hello", None, None)
+            .unwrap();
+        store
+            .save_message("conv-1", "assistant", "hi", None, None)
+            .unwrap();
+        // conv-2: has messages
+        store
+            .save_message("conv-2", "user", "world", None, None)
+            .unwrap();
+        // conv-3: different dir, has messages
+        store
+            .save_message("conv-3", "user", "other dir", None, None)
+            .unwrap();
+
+        let convs = store.list_conversations("/project").unwrap();
+        assert_eq!(convs.len(), 2);
+        // Most recent first
+        assert_eq!(convs[0].id, "conv-2");
+        assert_eq!(convs[0].message_count, 1);
+        assert_eq!(convs[1].id, "conv-1");
+        assert_eq!(convs[1].message_count, 2);
+
+        // Different directory
+        let other_convs = store.list_conversations("/other").unwrap();
+        assert_eq!(other_convs.len(), 1);
+        assert_eq!(other_convs[0].id, "conv-3");
+    }
+
+    #[test]
+    fn test_list_conversations_empty_dir() {
+        let store = MemoryStore::in_memory().unwrap();
+        let convs = store.list_conversations("/empty").unwrap();
+        assert!(convs.is_empty());
+    }
+
+    #[test]
+    fn test_update_conversation_title() {
+        let store = MemoryStore::in_memory().unwrap();
+        store.create_conversation("conv-t", "/tmp").unwrap();
+        store
+            .save_message("conv-t", "user", "hello", None, None)
+            .unwrap();
+
+        store
+            .update_conversation_title("conv-t", "fix the bug in login")
+            .unwrap();
+
+        let convs = store.list_conversations("/tmp").unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].title, Some("fix the bug in login".to_string()));
+    }
+
+    #[test]
+    fn test_backward_compat_null_working_dir() {
+        let store = MemoryStore::in_memory().unwrap();
+        // Simulate old data with NULL working_dir
+        let now = chrono::Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute(
+                "INSERT INTO conversations (id, created_at, updated_at) VALUES (?1, ?2, ?3)",
+                params!["old-conv", now, now],
+            )
+            .unwrap();
+        store
+            .save_message("old-conv", "user", "old message", None, None)
+            .unwrap();
+
+        // Should appear in any working_dir listing (backward compat)
+        let convs = store.list_conversations("/any-dir").unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].id, "old-conv");
+
+        // Should also be found by get_latest
+        let latest = store.get_latest_conversation_id("/any-dir").unwrap();
+        assert_eq!(latest, Some("old-conv".to_string()));
     }
 }
