@@ -281,6 +281,7 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
         }
     };
 
+    let mut conversation_created = false;
     let conversation_id = if continue_conv {
         if let Some(ref store) = store {
             match store.get_latest_conversation_id() {
@@ -300,36 +301,19 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
                             messages.len().to_string().cyan()
                         );
                     }
+                    conversation_created = true;
                     id
                 }
                 _ => {
                     println!("No previous conversation found. Starting new.\n");
-                    let id = uuid::Uuid::new_v4().to_string();
-                    if let Err(e) = store.create_conversation(&id) {
-                        eprintln!(
-                            "{} Failed to create conversation: {}",
-                            "Warning:".yellow(),
-                            e
-                        );
-                    }
-                    id
+                    uuid::Uuid::new_v4().to_string()
                 }
             }
         } else {
             uuid::Uuid::new_v4().to_string()
         }
     } else {
-        let id = uuid::Uuid::new_v4().to_string();
-        if let Some(ref store) = store {
-            if let Err(e) = store.create_conversation(&id) {
-                eprintln!(
-                    "{} Failed to create conversation: {}",
-                    "Warning:".yellow(),
-                    e
-                );
-            }
-        }
-        id
+        uuid::Uuid::new_v4().to_string()
     };
 
     let mut current_model = model;
@@ -374,6 +358,20 @@ fn run_chat(model: Option<String>, continue_conv: bool, message: Option<String>,
                             continue;
                         }
                     }
+                }
+
+                // Create conversation lazily on first message
+                if !conversation_created {
+                    if let Some(ref store) = store {
+                        if let Err(e) = store.create_conversation(&conversation_id) {
+                            eprintln!(
+                                "{} Failed to create conversation: {}",
+                                "Warning:".yellow(),
+                                e
+                            );
+                        }
+                    }
+                    conversation_created = true;
                 }
 
                 // Save user message

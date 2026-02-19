@@ -112,9 +112,11 @@ impl MemoryStore {
     }
 
     pub fn get_latest_conversation_id(&self) -> SqliteResult<Option<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM conversations ORDER BY updated_at DESC LIMIT 1")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id FROM conversations c
+             WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+             ORDER BY c.updated_at DESC LIMIT 1",
+        )?;
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
             Ok(Some(row.get(0)?))
@@ -152,11 +154,15 @@ mod tests {
         let store = MemoryStore::in_memory().unwrap();
         assert!(store.get_latest_conversation_id().unwrap().is_none());
 
+        // Empty conversations should not be returned
         store.create_conversation("conv-1").unwrap();
         store.create_conversation("conv-2").unwrap();
+        assert!(store.get_latest_conversation_id().unwrap().is_none());
 
+        // Only conversations with messages should be returned
+        store.save_message("conv-1", "user", "hello", None).unwrap();
         let latest = store.get_latest_conversation_id().unwrap();
-        assert!(latest.is_some());
+        assert_eq!(latest, Some("conv-1".to_string()));
     }
 
     #[test]
