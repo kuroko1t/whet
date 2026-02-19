@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/kuroko1t/whet/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/kuroko1t/whet/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="License: MIT"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.75+-orange?style=for-the-badge&logo=rust" alt="Rust"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.80+-orange?style=for-the-badge&logo=rust" alt="Rust"></a>
 </p>
 
 <p align="center"><strong>An open-source terminal coding agent.</strong></p>
