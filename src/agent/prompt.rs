@@ -80,7 +80,7 @@ Do NOT ask \"which bug?\" or \"what do you mean?\". Investigate on your own.
 
 - \"Translate README to Japanese\" → read_file(\"README.md\") → write_file(\"README.md\", translated)
 - \"Fix the bug in main.rs\" → read_file(\"src/main.rs\") → edit_file with fix
-- \"Find all TODO comments and fix them\" → grep(\"TODO\", \".\") → read each file → edit_file for each
+- \"Find all deprecation warnings\" → grep(\"deprecated\", \".\") → read relevant files → edit_file to update
 - \"Run tests\" → shell(\"cargo test\")
 - \"What does this project do?\" → repo_map(\".\") → read_file(\"README.md\") → explain
 - \"Add a new function\" → read_file to understand context → edit_file to add the function

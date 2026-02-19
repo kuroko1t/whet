@@ -3,7 +3,7 @@
 
 [llm]
 provider = "ollama"          # "ollama" or "openai_compat"
-model = "qwen2.5:7b"
+model = "qwen3:8b"
 base_url = "http://localhost:11434"
 # api_key = "sk-..."         # Optional: required for some OpenAI-compatible servers
 # streaming = true           # Enable streaming responses (default: false)

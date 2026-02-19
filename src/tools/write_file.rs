@@ -45,6 +45,17 @@ impl Tool for WriteFileTool {
             )));
         }
 
+        // Protect against emptying existing files
+        if std::path::Path::new(path).exists() {
+            let existing_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            if content.is_empty() && existing_size > 0 {
+                return Err(ToolError::PermissionDenied(format!(
+                    "Refusing to overwrite '{}' ({} bytes) with empty content",
+                    path, existing_size
+                )));
+            }
+        }
+
         std::fs::write(path, content).map_err(|e| {
             ToolError::ExecutionFailed(format!("Failed to write '{}': {}", path, e))
         })?;
@@ -157,14 +168,60 @@ mod tests {
     }
 
     #[test]
-    fn test_write_empty_content() {
+    fn test_write_allows_empty_new_file() {
         let tool = WriteFileTool;
-        let path = "/tmp/whet_test_empty.txt";
+        let path = "/tmp/whet_test_empty_new.txt";
+        // Ensure file does not exist
+        fs::remove_file(path).ok();
+
         let result = tool.execute(json!({"path": path, "content": ""})).unwrap();
         assert!(result.contains("Successfully wrote"));
 
         let read_back = fs::read_to_string(path).unwrap();
         assert_eq!(read_back, "");
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_write_blocks_emptying_existing_file() {
+        let tool = WriteFileTool;
+        let path = "/tmp/whet_test_no_empty_overwrite.txt";
+
+        // Create a file with content first
+        fs::write(path, "important content").unwrap();
+
+        // Attempt to overwrite with empty content should fail
+        let result = tool.execute(json!({"path": path, "content": ""}));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
+
+        // Original content should be preserved
+        let read_back = fs::read_to_string(path).unwrap();
+        assert_eq!(read_back, "important content");
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_write_allows_overwrite_with_content() {
+        let tool = WriteFileTool;
+        let path = "/tmp/whet_test_overwrite_with_content.txt";
+
+        // Create a file with content
+        fs::write(path, "old content").unwrap();
+
+        // Overwrite with new non-empty content should succeed
+        let result = tool
+            .execute(json!({"path": path, "content": "new content"}))
+            .unwrap();
+        assert!(result.contains("Successfully wrote"));
+
+        let read_back = fs::read_to_string(path).unwrap();
+        assert_eq!(read_back, "new content");
 
         fs::remove_file(path).ok();
     }

@@ -100,7 +100,7 @@ impl Default for Config {
         Self {
             llm: LlmConfig {
                 provider: "ollama".to_string(),
-                model: "qwen2.5:7b".to_string(),
+                model: "qwen3:8b".to_string(),
                 base_url: "http://localhost:11434".to_string(),
                 api_key: None,
                 streaming: false,
@@ -177,7 +177,7 @@ mod tests {
     fn test_default_config_values() {
         let config = Config::default();
         assert_eq!(config.llm.provider, "ollama");
-        assert_eq!(config.llm.model, "qwen2.5:7b");
+        assert_eq!(config.llm.model, "qwen3:8b");
         assert_eq!(config.llm.base_url, "http://localhost:11434");
         assert_eq!(config.agent.max_iterations, 10);
         assert_eq!(config.memory.database_path, "~/.whet/memory.db");
@@ -262,7 +262,7 @@ database_path = "test.db"
     fn test_config_load_returns_defaults_when_no_file() {
         // load() should return defaults when config file doesn't exist
         let config = Config::load();
-        assert_eq!(config.llm.model, "qwen2.5:7b");
+        assert_eq!(config.llm.model, "qwen3:8b");
     }
 
     // --- Backward compatibility tests ---
