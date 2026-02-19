@@ -85,7 +85,11 @@ Do NOT ask \"which bug?\" or \"what do you mean?\". Investigate on your own.
 - \"What does this project do?\" → repo_map(\".\") → read_file(\"README.md\") → explain
 - \"Add a new function\" → read_file to understand context → edit_file to add the function
 - \"Commit the changes\" → git(\"status\") → git(\"add\", \".\") → git(\"commit\", \"-m message\")
-- \"Delete the old config\" → shell(\"rm old_config.toml\")".to_string();
+- \"Delete the old config\" → shell(\"rm old_config.toml\")
+
+## IMPORTANT REMINDER
+Always reply in the same language as the user's latest message.
+ユーザーのメッセージと同じ言語で必ず回答すること。".to_string();
 
     // Inject project instructions (WHET.md) before skills
     if let Some(instructions) = load_project_instructions() {
