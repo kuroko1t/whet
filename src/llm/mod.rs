@@ -32,10 +32,17 @@ impl fmt::Display for Role {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LlmResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
+    pub usage: TokenUsage,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

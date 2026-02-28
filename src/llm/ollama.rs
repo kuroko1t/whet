@@ -1,4 +1,6 @@
-use super::{LlmError, LlmProvider, LlmResponse, Message, Role, ToolCall, ToolDefinition};
+use super::{
+    LlmError, LlmProvider, LlmResponse, Message, Role, TokenUsage, ToolCall, ToolDefinition,
+};
 use serde::{Deserialize, Serialize};
 
 pub struct OllamaClient {
@@ -56,6 +58,10 @@ struct OllamaChatResponse {
     message: OllamaMessage,
     #[serde(default)]
     done: Option<bool>,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
 }
 
 // --- Implementation ---
@@ -185,6 +191,10 @@ impl LlmProvider for OllamaClient {
         Ok(LlmResponse {
             content,
             tool_calls,
+            usage: TokenUsage {
+                prompt_tokens: resp_body.prompt_eval_count,
+                completion_tokens: resp_body.eval_count,
+            },
         })
     }
 
@@ -233,6 +243,7 @@ impl LlmProvider for OllamaClient {
         let reader = std::io::BufReader::new(response);
         let mut accumulated_content = String::with_capacity(1024);
         let mut tool_calls = Vec::new();
+        let mut usage = TokenUsage::default();
 
         use std::io::BufRead;
         for line_result in reader.lines() {
@@ -265,8 +276,12 @@ impl LlmProvider for OllamaClient {
                 }
             }
 
-            // Check if streaming is done
+            // Check if streaming is done — capture usage from final chunk
             if chunk.done.unwrap_or(false) {
+                usage = TokenUsage {
+                    prompt_tokens: chunk.prompt_eval_count,
+                    completion_tokens: chunk.eval_count,
+                };
                 break;
             }
         }
@@ -280,6 +295,7 @@ impl LlmProvider for OllamaClient {
         Ok(LlmResponse {
             content,
             tool_calls,
+            usage,
         })
     }
 }
@@ -746,5 +762,50 @@ mod tests {
         assert_eq!(tool_calls[0].id, "call_0");
         assert_eq!(tool_calls[1].name, "list_dir");
         assert_eq!(tool_calls[1].id, "call_1");
+    }
+
+    // --- Usage field deserialization tests ---
+
+    #[test]
+    fn test_response_parse_with_usage() {
+        let json = json!({
+            "message": {
+                "role": "assistant",
+                "content": "Hello!"
+            },
+            "done": true,
+            "prompt_eval_count": 42,
+            "eval_count": 128
+        });
+        let resp: OllamaChatResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.prompt_eval_count, Some(42));
+        assert_eq!(resp.eval_count, Some(128));
+    }
+
+    #[test]
+    fn test_response_parse_without_usage() {
+        let json = json!({
+            "message": {
+                "role": "assistant",
+                "content": "Hello!"
+            }
+        });
+        let resp: OllamaChatResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.prompt_eval_count, None);
+        assert_eq!(resp.eval_count, None);
+    }
+
+    #[test]
+    fn test_streaming_done_chunk_has_usage() {
+        let chunk_json = json!({
+            "message": {"role": "assistant", "content": ""},
+            "done": true,
+            "prompt_eval_count": 100,
+            "eval_count": 50
+        });
+        let chunk: OllamaChatResponse = serde_json::from_value(chunk_json).unwrap();
+        assert_eq!(chunk.done, Some(true));
+        assert_eq!(chunk.prompt_eval_count, Some(100));
+        assert_eq!(chunk.eval_count, Some(50));
     }
 }

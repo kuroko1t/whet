@@ -1,4 +1,4 @@
-use super::{LlmError, LlmProvider, LlmResponse, Message, ToolCall, ToolDefinition};
+use super::{LlmError, LlmProvider, LlmResponse, Message, TokenUsage, ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
 
 pub struct OpenAiCompatClient {
@@ -221,6 +221,7 @@ impl LlmProvider for OpenAiCompatClient {
         Ok(LlmResponse {
             content,
             tool_calls,
+            usage: TokenUsage::default(),
         })
     }
 
@@ -365,6 +366,7 @@ impl LlmProvider for OpenAiCompatClient {
         Ok(LlmResponse {
             content,
             tool_calls,
+            usage: TokenUsage::default(),
         })
     }
 }

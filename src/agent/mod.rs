@@ -1,11 +1,57 @@
 pub mod prompt;
 
 use crate::config::{PermissionMode, ToolRiskLevel};
-use crate::llm::{LlmProvider, Message};
+use crate::llm::{LlmProvider, Message, TokenUsage};
 use crate::skills::Skill;
 use crate::tools::ToolRegistry;
 use colored::Colorize;
 use std::collections::HashSet;
+
+#[derive(Debug, Default)]
+pub struct SessionStats {
+    pub llm_calls: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub tool_calls_ok: u64,
+    pub tool_calls_failed: u64,
+}
+
+impl SessionStats {
+    pub fn record_llm_call(&mut self, usage: &TokenUsage) {
+        self.llm_calls += 1;
+        if let Some(pt) = usage.prompt_tokens {
+            self.prompt_tokens += pt;
+        }
+        if let Some(ct) = usage.completion_tokens {
+            self.completion_tokens += ct;
+        }
+    }
+
+    pub fn record_tool_call(&mut self, success: bool) {
+        if success {
+            self.tool_calls_ok += 1;
+        } else {
+            self.tool_calls_failed += 1;
+        }
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens + self.completion_tokens
+    }
+
+    pub fn total_tool_calls(&self) -> u64 {
+        self.tool_calls_ok + self.tool_calls_failed
+    }
+
+    pub fn tool_success_rate(&self) -> Option<f64> {
+        let total = self.total_tool_calls();
+        if total == 0 {
+            None
+        } else {
+            Some(self.tool_calls_ok as f64 / total as f64 * 100.0)
+        }
+    }
+}
 
 const MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
 const MAX_CONTEXT_MESSAGES: usize = 40;
@@ -16,6 +62,7 @@ pub struct Agent {
     pub tools: ToolRegistry,
     pub memory: Vec<Message>,
     pub config: AgentConfig,
+    pub stats: SessionStats,
     /// Tracks paths that have been read via read_file, used to enforce read-before-edit.
     read_paths: HashSet<String>,
     /// When true, skip the read-before-edit check (resumed sessions lack tool call history).
@@ -56,6 +103,7 @@ impl Agent {
             tools,
             memory,
             config,
+            stats: SessionStats::default(),
             read_paths: HashSet::new(),
             resumed: false,
         }
@@ -183,6 +231,8 @@ impl Agent {
                 Err(e) => return format!("Error: {}", e),
             };
 
+            self.stats.record_llm_call(&response.usage);
+
             // If no tool calls, return the content
             if response.tool_calls.is_empty() {
                 let content = response.content.unwrap_or_default();
@@ -218,44 +268,50 @@ impl Agent {
                         !self.read_paths.contains(&Self::normalize_tool_path(p))
                     });
 
-                let result = if needs_read_first {
-                    let p = tool_call.arguments["path"].as_str().unwrap_or("<unknown>");
-                    format!(
-                        "Warning: You must read_file(\"{}\") before using {}. \
+                let (result, tool_success) =
+                    if needs_read_first {
+                        let p = tool_call.arguments["path"].as_str().unwrap_or("<unknown>");
+                        (
+                            format!(
+                                "Warning: You must read_file(\"{}\") before using {}. \
                          Read the file first to see its current content, then retry.",
-                        p, tool_call.name
-                    )
-                } else if let Some(tool) = self.tools.get(&tool_call.name) {
-                    // Determine effective risk level (dynamic for git)
-                    let effective_risk = if tool_call.name == "git" {
-                        let git_cmd = tool_call.arguments["command"].as_str().unwrap_or("");
-                        crate::tools::git::git_command_risk_level(git_cmd)
-                    } else {
-                        tool.risk_level()
-                    };
+                                p, tool_call.name
+                            ),
+                            false,
+                        )
+                    } else if let Some(tool) = self.tools.get(&tool_call.name) {
+                        // Determine effective risk level (dynamic for git)
+                        let effective_risk = if tool_call.name == "git" {
+                            let git_cmd = tool_call.arguments["command"].as_str().unwrap_or("");
+                            crate::tools::git::git_command_risk_level(git_cmd)
+                        } else {
+                            tool.risk_level()
+                        };
 
-                    // In plan mode, block non-safe tools
-                    if self.config.plan_mode && effective_risk != ToolRiskLevel::Safe {
-                        "Tool blocked: plan mode is active (read-only). Use /plan to toggle."
-                            .to_string()
-                    } else if self.needs_approval(effective_risk) {
-                        if !on_approve(&tool_call.name, &tool_call.arguments) {
-                            "Tool execution denied by user.".to_string()
+                        // In plan mode, block non-safe tools
+                        if self.config.plan_mode && effective_risk != ToolRiskLevel::Safe {
+                            ("Tool blocked: plan mode is active (read-only). Use /plan to toggle."
+                            .to_string(), false)
+                        } else if self.needs_approval(effective_risk) {
+                            if !on_approve(&tool_call.name, &tool_call.arguments) {
+                                ("Tool execution denied by user.".to_string(), false)
+                            } else {
+                                match tool.execute(tool_call.arguments.clone()) {
+                                    Ok(output) => (output, true),
+                                    Err(e) => (format!("Tool error: {}", e), false),
+                                }
+                            }
                         } else {
                             match tool.execute(tool_call.arguments.clone()) {
-                                Ok(output) => output,
-                                Err(e) => format!("Tool error: {}", e),
+                                Ok(output) => (output, true),
+                                Err(e) => (format!("Tool error: {}", e), false),
                             }
                         }
                     } else {
-                        match tool.execute(tool_call.arguments.clone()) {
-                            Ok(output) => output,
-                            Err(e) => format!("Tool error: {}", e),
-                        }
-                    }
-                } else {
-                    format!("Unknown tool: {}", tool_call.name)
-                };
+                        (format!("Unknown tool: {}", tool_call.name), false)
+                    };
+
+                self.stats.record_tool_call(tool_success);
 
                 let result = if result.len() > MAX_TOOL_OUTPUT_CHARS {
                     let mut end = MAX_TOOL_OUTPUT_CHARS;
@@ -319,7 +375,7 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{LlmError, LlmResponse, Role, ToolCall, ToolDefinition};
+    use crate::llm::{LlmError, LlmResponse, Role, TokenUsage, ToolCall, ToolDefinition};
     use crate::tools::default_registry;
     use std::cell::RefCell;
 
@@ -353,6 +409,7 @@ mod tests {
                 Ok(LlmResponse {
                     content: Some("(no more scripted responses)".to_string()),
                     tool_calls: vec![],
+                    usage: TokenUsage::default(),
                 })
             }
         }
@@ -382,6 +439,7 @@ mod tests {
         let llm = MockLlm::new(vec![LlmResponse {
             content: Some("Hello! How can I help?".to_string()),
             tool_calls: vec![],
+            usage: TokenUsage::default(),
         }]);
         let mut agent = make_agent(Box::new(llm));
         let response = agent.process_message("Hi there");
@@ -393,6 +451,7 @@ mod tests {
         let llm = MockLlm::new(vec![LlmResponse {
             content: None,
             tool_calls: vec![],
+            usage: TokenUsage::default(),
         }]);
         let mut agent = make_agent(Box::new(llm));
         let response = agent.process_message("Hi");
@@ -412,10 +471,12 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "Cargo.toml"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("The project is named whet.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -440,10 +501,12 @@ mod tests {
                         arguments: serde_json::json!({"path": "src"}),
                     },
                 ],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("I found 2 things.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -465,10 +528,12 @@ mod tests {
                     name: "nonexistent_tool".to_string(),
                     arguments: serde_json::json!({}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Sorry, that tool doesn't exist.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -496,10 +561,12 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "/nonexistent/file.txt"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("The file doesn't exist.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -535,6 +602,7 @@ mod tests {
                     name: "list_dir".to_string(),
                     arguments: serde_json::json!({"path": "."}),
                 }],
+                usage: TokenUsage::default(),
             });
         }
         let llm = MockLlm::new(responses);
@@ -557,10 +625,12 @@ mod tests {
             LlmResponse {
                 content: Some("First response".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Second response".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -579,6 +649,7 @@ mod tests {
         let llm = MockLlm::new(vec![LlmResponse {
             content: Some("ok".to_string()),
             tool_calls: vec![],
+            usage: TokenUsage::default(),
         }]);
         let agent = make_agent(Box::new(llm));
 
@@ -600,10 +671,12 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "Cargo.toml"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Done reading.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -653,6 +726,7 @@ mod tests {
                 Ok(LlmResponse {
                     content: Some("(no more responses)".to_string()),
                     tool_calls: vec![],
+                    usage: TokenUsage::default(),
                 })
             }
         }
@@ -673,6 +747,7 @@ mod tests {
                 Ok(LlmResponse {
                     content: Some("(no more responses)".to_string()),
                     tool_calls: vec![],
+                    usage: TokenUsage::default(),
                 })
             }
         }
@@ -685,6 +760,7 @@ mod tests {
             LlmResponse {
                 content: Some("Hello world!".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         )]);
 
@@ -712,6 +788,7 @@ mod tests {
             LlmResponse {
                 content: Some("token1".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         )]);
 
@@ -738,6 +815,7 @@ mod tests {
                         name: "read_file".to_string(),
                         arguments: serde_json::json!({"path": "Cargo.toml"}),
                     }],
+                    usage: TokenUsage::default(),
                 },
             ),
             (
@@ -745,6 +823,7 @@ mod tests {
                 LlmResponse {
                     content: Some("The project.".to_string()),
                     tool_calls: vec![],
+                    usage: TokenUsage::default(),
                 },
             ),
         ]);
@@ -788,6 +867,7 @@ mod tests {
                 LlmResponse {
                     content: Some("First".to_string()),
                     tool_calls: vec![],
+                    usage: TokenUsage::default(),
                 },
             ),
             (
@@ -795,6 +875,7 @@ mod tests {
                 LlmResponse {
                     content: Some("Second".to_string()),
                     tool_calls: vec![],
+                    usage: TokenUsage::default(),
                 },
             ),
         ]);
@@ -826,10 +907,12 @@ mod tests {
         let llm1 = MockLlm::new(vec![LlmResponse {
             content: Some("Same result".to_string()),
             tool_calls: vec![],
+            usage: TokenUsage::default(),
         }]);
         let llm2 = MockLlm::new(vec![LlmResponse {
             content: Some("Same result".to_string()),
             tool_calls: vec![],
+            usage: TokenUsage::default(),
         }]);
 
         let mut agent1 = make_agent(Box::new(llm1));
@@ -893,10 +976,12 @@ mod tests {
                     name: "shell".to_string(),
                     arguments: serde_json::json!({"command": "echo hello"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("I couldn't execute the command.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Default);
@@ -928,10 +1013,12 @@ mod tests {
                     name: "shell".to_string(),
                     arguments: serde_json::json!({"command": "echo approved"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Command executed.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Default);
@@ -962,10 +1049,12 @@ mod tests {
                     name: "shell".to_string(),
                     arguments: serde_json::json!({"command": "echo yolo"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Done.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Yolo);
@@ -995,10 +1084,12 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "Cargo.toml"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Read the file.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Default);
@@ -1031,10 +1122,12 @@ mod tests {
                         "content": "test"
                     }),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("File written.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::AcceptEdits);
@@ -1068,10 +1161,12 @@ mod tests {
                     name: "shell".to_string(),
                     arguments: serde_json::json!({"command": "rm -rf /"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Blocked.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = Agent::new(
@@ -1106,10 +1201,12 @@ mod tests {
                     name: "write_file".to_string(),
                     arguments: serde_json::json!({"path": "/tmp/test.txt", "content": "x"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Can't write.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = Agent::new(
@@ -1144,10 +1241,12 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "Cargo.toml"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Read successfully.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = Agent::new(
@@ -1186,10 +1285,12 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "Cargo.toml"}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Done.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1220,10 +1321,12 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": path}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Done.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1265,10 +1368,12 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": path}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Done.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1304,10 +1409,12 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": path}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Done.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1345,10 +1452,12 @@ mod tests {
                         "new_text": "hi"
                     }),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Warned.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1382,6 +1491,7 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": path}),
                 }],
+                usage: TokenUsage::default(),
             },
             // Step 2: edit_file (should succeed now)
             LlmResponse {
@@ -1395,10 +1505,12 @@ mod tests {
                         "new_text": "hi"
                     }),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Edited.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1436,6 +1548,7 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "./tmp/whet_test_edit_norm.txt"}),
                 }],
+                usage: TokenUsage::default(),
             },
             // edit_file without "./" prefix — should still match
             LlmResponse {
@@ -1449,10 +1562,12 @@ mod tests {
                         "new_text": "hi"
                     }),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Done.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1487,10 +1602,12 @@ mod tests {
                         "diff": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new"
                     }),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Warned.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1523,10 +1640,12 @@ mod tests {
                         "content": "new file content"
                     }),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Written.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1566,10 +1685,12 @@ mod tests {
                         "new_text": "hi"
                     }),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Edited.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1604,10 +1725,12 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": path}),
                 }],
+                usage: TokenUsage::default(),
             },
             LlmResponse {
                 content: Some("Read.".to_string()),
                 tool_calls: vec![],
+                usage: TokenUsage::default(),
             },
         ]);
         let mut agent = make_agent(Box::new(llm));
@@ -1621,5 +1744,97 @@ mod tests {
         );
 
         std::fs::remove_file(path).ok();
+    }
+
+    // --- SessionStats tests ---
+
+    #[test]
+    fn test_session_stats_default() {
+        let stats = SessionStats::default();
+        assert_eq!(stats.llm_calls, 0);
+        assert_eq!(stats.prompt_tokens, 0);
+        assert_eq!(stats.completion_tokens, 0);
+        assert_eq!(stats.tool_calls_ok, 0);
+        assert_eq!(stats.tool_calls_failed, 0);
+        assert_eq!(stats.total_tokens(), 0);
+        assert_eq!(stats.total_tool_calls(), 0);
+        assert!(stats.tool_success_rate().is_none());
+    }
+
+    #[test]
+    fn test_session_stats_record_llm_call() {
+        let mut stats = SessionStats::default();
+        stats.record_llm_call(&TokenUsage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+        });
+        assert_eq!(stats.llm_calls, 1);
+        assert_eq!(stats.prompt_tokens, 100);
+        assert_eq!(stats.completion_tokens, 50);
+        assert_eq!(stats.total_tokens(), 150);
+
+        stats.record_llm_call(&TokenUsage {
+            prompt_tokens: Some(200),
+            completion_tokens: Some(80),
+        });
+        assert_eq!(stats.llm_calls, 2);
+        assert_eq!(stats.prompt_tokens, 300);
+        assert_eq!(stats.completion_tokens, 130);
+    }
+
+    #[test]
+    fn test_session_stats_record_llm_call_none_usage() {
+        let mut stats = SessionStats::default();
+        stats.record_llm_call(&TokenUsage::default());
+        assert_eq!(stats.llm_calls, 1);
+        assert_eq!(stats.prompt_tokens, 0);
+        assert_eq!(stats.completion_tokens, 0);
+    }
+
+    #[test]
+    fn test_session_stats_record_tool_call() {
+        let mut stats = SessionStats::default();
+        stats.record_tool_call(true);
+        stats.record_tool_call(true);
+        stats.record_tool_call(false);
+        assert_eq!(stats.tool_calls_ok, 2);
+        assert_eq!(stats.tool_calls_failed, 1);
+        assert_eq!(stats.total_tool_calls(), 3);
+        let rate = stats.tool_success_rate().unwrap();
+        assert!((rate - 66.67).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_agent_stats_tracked_in_process_message() {
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "Cargo.toml"}),
+                }],
+                usage: TokenUsage {
+                    prompt_tokens: Some(100),
+                    completion_tokens: Some(50),
+                },
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    prompt_tokens: Some(200),
+                    completion_tokens: Some(80),
+                },
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        agent.process_message("Read file");
+
+        assert_eq!(agent.stats.llm_calls, 2);
+        assert_eq!(agent.stats.prompt_tokens, 300);
+        assert_eq!(agent.stats.completion_tokens, 130);
+        assert_eq!(agent.stats.tool_calls_ok, 1);
+        assert_eq!(agent.stats.tool_calls_failed, 0);
     }
 }

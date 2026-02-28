@@ -10,7 +10,7 @@ mod security;
 mod skills;
 mod tools;
 
-use agent::{Agent, AgentConfig};
+use agent::{Agent, AgentConfig, SessionStats};
 use config::Config;
 use llm::LlmProvider;
 use memory::store::MemoryStore;
@@ -287,6 +287,28 @@ fn format_time_ago(rfc3339: &str) -> String {
     }
 }
 
+fn print_session_stats(stats: &SessionStats) {
+    if stats.llm_calls == 0 {
+        return;
+    }
+    eprintln!("{}", "--- Session Stats ---".dimmed());
+    eprintln!("  LLM calls:          {}", stats.llm_calls);
+    eprintln!("  Prompt tokens:      {}", stats.prompt_tokens);
+    eprintln!("  Completion tokens:  {}", stats.completion_tokens);
+    eprintln!("  Total tokens:       {}", stats.total_tokens());
+    let total_tools = stats.total_tool_calls();
+    if total_tools > 0 {
+        eprintln!(
+            "  Tool calls:         {} ({} ok / {} failed)",
+            total_tools, stats.tool_calls_ok, stats.tool_calls_failed
+        );
+        if let Some(rate) = stats.tool_success_rate() {
+            eprintln!("  Tool success rate:  {:.0}%", rate);
+        }
+    }
+    eprintln!("{}", "---------------------".dimmed());
+}
+
 fn run_chat(
     model: Option<String>,
     resume: Option<String>,
@@ -316,6 +338,7 @@ fn run_chat(
                 agent.process_message_with_callbacks(&msg, &mut |_| {}, &mut |_, _| yolo);
             println!("{}", response);
         }
+        print_session_stats(&agent.stats);
         return;
     }
 
@@ -595,6 +618,7 @@ fn run_chat(
             }
             Err(rustyline::error::ReadlineError::Eof) => {
                 println!("\nGoodbye!");
+                print_session_stats(&agent.stats);
                 // Save input history
                 if let Some(parent) = history_path.parent() {
                     let _ = std::fs::create_dir_all(parent);

@@ -1,4 +1,6 @@
-use super::{LlmError, LlmProvider, LlmResponse, Message, Role, ToolCall, ToolDefinition};
+use super::{
+    LlmError, LlmProvider, LlmResponse, Message, Role, TokenUsage, ToolCall, ToolDefinition,
+};
 use serde::{Deserialize, Serialize};
 
 pub struct AnthropicClient {
@@ -189,6 +191,7 @@ impl AnthropicClient {
         LlmResponse {
             content,
             tool_calls,
+            usage: TokenUsage::default(),
         }
     }
 }
@@ -409,6 +412,7 @@ impl LlmProvider for AnthropicClient {
         Ok(LlmResponse {
             content,
             tool_calls,
+            usage: TokenUsage::default(),
         })
     }
 }

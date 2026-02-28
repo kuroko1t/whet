@@ -1,4 +1,6 @@
-use super::{LlmError, LlmProvider, LlmResponse, Message, Role, ToolCall, ToolDefinition};
+use super::{
+    LlmError, LlmProvider, LlmResponse, Message, Role, TokenUsage, ToolCall, ToolDefinition,
+};
 use serde::{Deserialize, Serialize};
 
 pub struct GeminiClient {
@@ -222,6 +224,7 @@ impl GeminiClient {
         Ok(LlmResponse {
             content,
             tool_calls,
+            usage: TokenUsage::default(),
         })
     }
 }
@@ -406,6 +409,7 @@ impl LlmProvider for GeminiClient {
         Ok(LlmResponse {
             content,
             tool_calls,
+            usage: TokenUsage::default(),
         })
     }
 }
