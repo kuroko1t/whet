@@ -59,8 +59,16 @@ struct ChatFunctionDef {
 }
 
 #[derive(Deserialize, Debug)]
+struct ChatResponseUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+}
+
+#[derive(Deserialize, Debug)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    #[serde(default)]
+    usage: Option<ChatResponseUsage>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -193,6 +201,11 @@ impl LlmProvider for OpenAiCompatClient {
             .json()
             .map_err(|e| LlmError::ParseError(format!("Failed to parse response: {}", e)))?;
 
+        let usage = TokenUsage {
+            prompt_tokens: resp_body.usage.as_ref().and_then(|u| u.prompt_tokens),
+            completion_tokens: resp_body.usage.as_ref().and_then(|u| u.completion_tokens),
+        };
+
         let choice = resp_body
             .choices
             .into_iter()
@@ -221,7 +234,7 @@ impl LlmProvider for OpenAiCompatClient {
         Ok(LlmResponse {
             content,
             tool_calls,
-            usage: TokenUsage::default(),
+            usage,
         })
     }
 
@@ -273,6 +286,8 @@ impl LlmProvider for OpenAiCompatClient {
         // Track tool calls by index for incremental assembly
         let mut tool_call_map: std::collections::HashMap<usize, (String, String, String)> =
             std::collections::HashMap::new();
+        // Track usage from the final chunk
+        let mut stream_usage = TokenUsage::default();
 
         use std::io::BufRead;
         for line_result in reader.lines() {
@@ -295,6 +310,16 @@ impl LlmProvider for OpenAiCompatClient {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+
+            // Extract usage from chunk (typically in the final chunk)
+            if let Some(usage) = chunk.get("usage") {
+                if let Some(pt) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                    stream_usage.prompt_tokens = Some(pt);
+                }
+                if let Some(ct) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                    stream_usage.completion_tokens = Some(ct);
+                }
+            }
 
             if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
                 if let Some(choice) = choices.first() {
@@ -366,7 +391,7 @@ impl LlmProvider for OpenAiCompatClient {
         Ok(LlmResponse {
             content,
             tool_calls,
-            usage: TokenUsage::default(),
+            usage: stream_usage,
         })
     }
 }
@@ -890,5 +915,95 @@ mod tests {
             .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
         assert!(parsed.is_object());
         assert_eq!(parsed.as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_response_parse_with_usage() {
+        let json_val = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello!"
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 42,
+                "completion_tokens": 15
+            }
+        });
+        let resp: ChatResponse = serde_json::from_value(json_val).unwrap();
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, Some(42));
+        assert_eq!(usage.completion_tokens, Some(15));
+    }
+
+    #[test]
+    fn test_response_parse_without_usage() {
+        let json_val = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello!"
+                }
+            }]
+        });
+        let resp: ChatResponse = serde_json::from_value(json_val).unwrap();
+        assert!(resp.usage.is_none());
+    }
+
+    #[test]
+    fn test_response_parse_with_partial_usage() {
+        let json_val = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello!"
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 42
+            }
+        });
+        let resp: ChatResponse = serde_json::from_value(json_val).unwrap();
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, Some(42));
+        assert_eq!(usage.completion_tokens, None);
+    }
+
+    #[test]
+    fn test_sse_usage_extraction() {
+        // Some providers send usage in the final SSE chunk
+        let sse_lines = vec![
+            r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5}}"#,
+            "data: [DONE]",
+        ];
+
+        let mut stream_usage = TokenUsage::default();
+
+        for line in sse_lines {
+            if !line.starts_with("data: ") {
+                continue;
+            }
+            let data = &line[6..];
+            if data == "[DONE]" {
+                break;
+            }
+            let chunk: serde_json::Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(usage) = chunk.get("usage") {
+                if let Some(pt) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                    stream_usage.prompt_tokens = Some(pt);
+                }
+                if let Some(ct) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                    stream_usage.completion_tokens = Some(ct);
+                }
+            }
+        }
+
+        assert_eq!(stream_usage.prompt_tokens, Some(100));
+        assert_eq!(stream_usage.completion_tokens, Some(5));
     }
 }
