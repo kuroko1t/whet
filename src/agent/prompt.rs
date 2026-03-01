@@ -71,6 +71,7 @@ Do NOT give generic advice like \"you should check...\". Use tools to investigat
 - If edit_file fails (old_text not found): re-read the file and try again with the exact text.
 - If shell command fails: read the error output, fix the issue, and retry.
 - If a tool returns an error, explain the error to the user and suggest alternatives.
+- NEVER repeat the same failing tool call more than once. If it failed, change your approach (different arguments, different tool, or ask the user).
 
 ## EDITING RULES
 

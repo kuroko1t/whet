@@ -38,7 +38,7 @@ impl Tool for ShellTool {
         let command = args["command"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'command' argument".to_string()))?;
-        let working_dir = args["working_dir"].as_str();
+        let working_dir = args["working_dir"].as_str().filter(|s| !s.is_empty());
 
         if let Err(reason) = check_command_safety(command) {
             return Err(ToolError::PermissionDenied(reason));
@@ -182,6 +182,16 @@ mod tests {
         let result =
             tool.execute(json!({"command": "echo hi", "working_dir": "/nonexistent_dir_12345"}));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_shell_empty_working_dir() {
+        let tool = ShellTool;
+        // Empty string working_dir should be treated as no working_dir (not cause an error)
+        let result = tool
+            .execute(json!({"command": "echo hi", "working_dir": ""}))
+            .unwrap();
+        assert!(result.contains("hi"));
     }
 
     #[test]
