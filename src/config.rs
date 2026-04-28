@@ -53,6 +53,37 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
     #[serde(default)]
     pub streaming: bool,
+    #[serde(default)]
+    pub options: LlmOptions,
+}
+
+/// Per-request inference knobs passed to local providers (Ollama, OpenAI-compatible).
+/// All fields are optional — when unset, the provider's own default is used.
+/// num_ctx is Ollama-specific (OpenAI-compat servers fix the context at startup).
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct LlmOptions {
+    /// Context window size in tokens (Ollama only). Critical for long-context models
+    /// like Qwen3.6 — Ollama defaults to ~4K which truncates long agent loops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_ctx: Option<u32>,
+    /// Maximum tokens to generate per response. Maps to OpenAI `max_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_predict: Option<i32>,
+    /// Sampling temperature (0.0 = deterministic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Nucleus sampling threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    /// Random seed (for reproducibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// Enable or disable thinking on reasoning models (Ollama only). Models like
+    /// Qwen3.6 emit a long internal reasoning trace by default, which is wasteful
+    /// for tool-calling agents. Set `false` for fast tool use; leave unset to
+    /// use the model's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -104,6 +135,7 @@ impl Default for Config {
                 base_url: "http://localhost:11434".to_string(),
                 api_key: None,
                 streaming: false,
+                options: LlmOptions::default(),
             },
             agent: AgentConfig {
                 max_iterations: 10,

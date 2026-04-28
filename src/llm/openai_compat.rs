@@ -1,22 +1,33 @@
 use super::{LlmError, LlmProvider, LlmResponse, Message, TokenUsage, ToolCall, ToolDefinition};
+use crate::config::LlmOptions;
 use serde::{Deserialize, Serialize};
 
 pub struct OpenAiCompatClient {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
+    options: LlmOptions,
     client: reqwest::blocking::Client,
 }
 
 // --- OpenAI-compatible API request/response types ---
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ChatTool>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    /// OpenAI uses `max_tokens`; we map LlmOptions::num_predict here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -79,7 +90,17 @@ struct ChatChoice {
 // --- Implementation ---
 
 impl OpenAiCompatClient {
+    #[allow(dead_code)]
     pub fn new(base_url: &str, model: &str, api_key: Option<String>) -> Self {
+        Self::with_options(base_url, model, api_key, LlmOptions::default())
+    }
+
+    pub fn with_options(
+        base_url: &str,
+        model: &str,
+        api_key: Option<String>,
+        options: LlmOptions,
+    ) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
@@ -88,6 +109,7 @@ impl OpenAiCompatClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key,
+            options,
             client,
         }
     }
@@ -156,6 +178,10 @@ impl LlmProvider for OpenAiCompatClient {
             messages: Self::convert_messages(messages),
             tools: Self::convert_tools(tools),
             stream: false,
+            temperature: self.options.temperature,
+            top_p: self.options.top_p,
+            max_tokens: self.options.num_predict,
+            seed: self.options.seed,
         };
 
         let mut req_builder = self.client.post(&url).json(&request);
@@ -251,6 +277,10 @@ impl LlmProvider for OpenAiCompatClient {
             messages: Self::convert_messages(messages),
             tools: Self::convert_tools(tools),
             stream: true,
+            temperature: self.options.temperature,
+            top_p: self.options.top_p,
+            max_tokens: self.options.num_predict,
+            seed: self.options.seed,
         };
 
         let mut req_builder = self.client.post(&url).json(&request);
@@ -553,6 +583,7 @@ mod tests {
             }],
             tools: vec![],
             stream: false,
+            ..Default::default()
         };
         let json_str = serde_json::to_string(&request).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -876,6 +907,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             stream: true,
+            ..Default::default()
         };
         let json_str = serde_json::to_string(&request).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();

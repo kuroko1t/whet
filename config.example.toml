@@ -8,6 +8,16 @@ base_url = "http://localhost:11434"
 # api_key = "sk-..."         # Optional: required for some OpenAI-compatible servers
 # streaming = true           # Enable streaming responses (default: false)
 
+# Per-request inference knobs (all optional; provider default is used when unset).
+# num_ctx is Ollama-only — OpenAI-compatible servers fix the context size at startup.
+# [llm.options]
+# num_ctx = 32768          # Context window in tokens. Default Ollama is ~4K-8K;
+#                          # raise this for long agent loops or 256K-context models.
+# num_predict = 4096       # Max tokens per response (maps to OpenAI `max_tokens`).
+# temperature = 0.0        # 0.0 for deterministic coding tasks.
+# top_p = 0.9
+# seed = 42                # For reproducibility.
+
 # OpenAI-compatible server examples:
 # [llm]
 # provider = "openai_compat"

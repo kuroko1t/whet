@@ -19,10 +19,11 @@ use tools::default_registry;
 
 fn create_provider(cfg: &Config, model: &str) -> Box<dyn LlmProvider> {
     match cfg.llm.provider.as_str() {
-        "openai_compat" => Box::new(llm::openai_compat::OpenAiCompatClient::new(
+        "openai_compat" => Box::new(llm::openai_compat::OpenAiCompatClient::with_options(
             &cfg.llm.base_url,
             model,
             cfg.llm.api_key.clone(),
+            cfg.llm.options.clone(),
         )),
         "anthropic" => {
             let api_key = cfg
@@ -54,7 +55,11 @@ fn create_provider(cfg: &Config, model: &str) -> Box<dyn LlmProvider> {
                 };
             Box::new(llm::gemini::GeminiClient::new(&base_url, model, api_key))
         }
-        _ => Box::new(llm::ollama::OllamaClient::new(&cfg.llm.base_url, model)),
+        _ => Box::new(llm::ollama::OllamaClient::with_options(
+            &cfg.llm.base_url,
+            model,
+            cfg.llm.options.clone(),
+        )),
     }
 }
 
@@ -305,6 +310,12 @@ fn print_session_stats(stats: &SessionStats) {
         if let Some(rate) = stats.tool_success_rate() {
             eprintln!("  Tool success rate:  {:.0}%", rate);
         }
+    }
+    if stats.text_to_tool_fallbacks > 0 {
+        eprintln!("  Text->tool fallbacks: {}", stats.text_to_tool_fallbacks);
+    }
+    if stats.reprompts > 0 {
+        eprintln!("  Re-prompts:         {}", stats.reprompts);
     }
     eprintln!("{}", "---------------------".dimmed());
 }

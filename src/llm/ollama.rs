@@ -1,23 +1,42 @@
 use super::{
     LlmError, LlmProvider, LlmResponse, Message, Role, TokenUsage, ToolCall, ToolDefinition,
 };
+use crate::config::LlmOptions;
 use serde::{Deserialize, Serialize};
 
 pub struct OllamaClient {
     pub base_url: String,
     pub model: String,
+    options: LlmOptions,
     client: reqwest::blocking::Client,
 }
 
 // --- Ollama API request/response types ---
 
 #[derive(Serialize)]
-struct OllamaChatRequest {
+struct OllamaChatRequest<'a> {
     model: String,
     messages: Vec<OllamaMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OllamaTool>,
+    /// Ollama-specific generation options. Skipped when every field is None
+    /// so requests stay backwards-compatible with older Ollama versions.
+    #[serde(skip_serializing_if = "is_options_empty")]
+    options: &'a LlmOptions,
+    /// Top-level Ollama field that disables/enables thinking on reasoning
+    /// models (Qwen3.6, GLM-Z1, etc.). Skipped unless the user explicitly set
+    /// `[llm.options] think = ...` in config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
+}
+
+fn is_options_empty(o: &&LlmOptions) -> bool {
+    o.num_ctx.is_none()
+        && o.num_predict.is_none()
+        && o.temperature.is_none()
+        && o.top_p.is_none()
+        && o.seed.is_none()
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -67,7 +86,12 @@ struct OllamaChatResponse {
 // --- Implementation ---
 
 impl OllamaClient {
+    #[allow(dead_code)]
     pub fn new(base_url: &str, model: &str) -> Self {
+        Self::with_options(base_url, model, LlmOptions::default())
+    }
+
+    pub fn with_options(base_url: &str, model: &str, options: LlmOptions) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
@@ -75,6 +99,7 @@ impl OllamaClient {
         Self {
             base_url: base_url.to_string(),
             model: model.to_string(),
+            options,
             client,
         }
     }
@@ -136,6 +161,8 @@ impl LlmProvider for OllamaClient {
             messages: Self::convert_messages(messages),
             stream: false,
             tools: Self::convert_tools(tools),
+            options: &self.options,
+            think: self.options.think,
         };
 
         let response = self.client.post(&url).json(&request).send().map_err(|e| {
@@ -211,6 +238,8 @@ impl LlmProvider for OllamaClient {
             messages: Self::convert_messages(messages),
             stream: true,
             tools: Self::convert_tools(tools),
+            options: &self.options,
+            think: self.options.think,
         };
 
         let response = self.client.post(&url).json(&request).send().map_err(|e| {
@@ -455,6 +484,7 @@ mod tests {
 
     #[test]
     fn test_request_serialization_no_tools() {
+        let opts = LlmOptions::default();
         let request = OllamaChatRequest {
             model: "qwen2.5:7b".to_string(),
             messages: vec![OllamaMessage {
@@ -464,6 +494,8 @@ mod tests {
             }],
             stream: false,
             tools: vec![],
+            options: &opts,
+            think: None,
         };
         let json_str = serde_json::to_string(&request).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -474,10 +506,13 @@ mod tests {
         assert_eq!(parsed["messages"][0]["content"], "Hello");
         // tools field should be absent (skip_serializing_if = "Vec::is_empty")
         assert!(parsed.get("tools").is_none());
+        // options field should be absent when every knob is None
+        assert!(parsed.get("options").is_none());
     }
 
     #[test]
     fn test_request_serialization_with_tools() {
+        let opts = LlmOptions::default();
         let request = OllamaChatRequest {
             model: "test-model".to_string(),
             messages: vec![],
@@ -490,12 +525,44 @@ mod tests {
                     parameters: json!({"type": "object"}),
                 },
             }],
+            options: &opts,
+            think: None,
         };
         let json_str = serde_json::to_string(&request).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(parsed["tools"][0]["type"], "function");
         assert_eq!(parsed["tools"][0]["function"]["name"], "test_tool");
+    }
+
+    #[test]
+    fn test_request_serialization_with_options() {
+        let opts = LlmOptions {
+            num_ctx: Some(32768),
+            num_predict: Some(2048),
+            temperature: Some(0.0),
+            top_p: None,
+            seed: Some(42),
+            think: Some(false),
+        };
+        let request = OllamaChatRequest {
+            model: "qwen3:14b".to_string(),
+            messages: vec![],
+            stream: false,
+            tools: vec![],
+            options: &opts,
+            think: opts.think,
+        };
+        let json_str = serde_json::to_string(&request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["options"]["num_ctx"], 32768);
+        assert_eq!(parsed["options"]["num_predict"], 2048);
+        assert_eq!(parsed["options"]["temperature"], 0.0);
+        assert_eq!(parsed["options"]["seed"], 42);
+        // top_p was None → omitted
+        assert!(parsed["options"].get("top_p").is_none());
+        // think is a top-level field (not inside options) when set
+        assert_eq!(parsed["think"], false);
     }
 
     // --- Response deserialization tests ---
