@@ -1,7 +1,7 @@
 pub mod prompt;
 
 use crate::config::{PermissionMode, ToolRiskLevel};
-use crate::llm::{LlmProvider, Message, TokenUsage};
+use crate::llm::{LlmProvider, Message, TokenUsage, ToolCall};
 use crate::skills::Skill;
 use crate::tools::ToolRegistry;
 use colored::Colorize;
@@ -14,6 +14,8 @@ pub struct SessionStats {
     pub completion_tokens: u64,
     pub tool_calls_ok: u64,
     pub tool_calls_failed: u64,
+    pub text_to_tool_fallbacks: u64,
+    pub reprompts: u64,
 }
 
 impl SessionStats {
@@ -225,6 +227,9 @@ impl Agent {
             self.tools.definitions()
         };
 
+        let mut reprompt_count: usize = 0;
+        const MAX_REPROMPTS: usize = 1;
+
         for _iteration in 0..self.config.max_iterations {
             let response = match self.llm.chat_streaming(&self.memory, tool_defs, on_token) {
                 Ok(resp) => resp,
@@ -233,8 +238,45 @@ impl Agent {
 
             self.stats.record_llm_call(&response.usage);
 
-            // If no tool calls, return the content
-            if response.tool_calls.is_empty() {
+            // Try to recover tool calls from text if the model didn't use the API
+            let mut effective_tool_calls = response.tool_calls;
+
+            if effective_tool_calls.is_empty() {
+                let content = response.content.clone().unwrap_or_default();
+
+                // Pattern 2: Extract tool calls from JSON in text content
+                let extracted = try_extract_tool_calls_from_text(&content, &self.tools);
+                if !extracted.is_empty() {
+                    eprintln!(
+                        "  {}",
+                        format!(
+                            "[fallback: extracted {} tool call(s) from text]",
+                            extracted.len()
+                        )
+                        .yellow()
+                    );
+                    self.stats.text_to_tool_fallbacks += 1;
+                    effective_tool_calls = extracted;
+                }
+                // Pattern 1: Re-prompt if model asked a question instead of acting
+                else if reprompt_count < MAX_REPROMPTS && looks_like_question(&content) {
+                    eprintln!(
+                        "  {}",
+                        "[re-prompt: model asked instead of acting]".yellow()
+                    );
+                    self.stats.reprompts += 1;
+                    reprompt_count += 1;
+                    self.memory.push(Message::assistant(&content));
+                    self.memory.push(Message::user(
+                        "Don't ask questions. Use your tools to take action directly. \
+                         If you're unsure, start by reading files or exploring the project structure.",
+                    ));
+                    continue;
+                }
+            }
+
+            // If still no tool calls after recovery, return the content
+            if effective_tool_calls.is_empty() {
                 let content = response.content.unwrap_or_default();
                 self.memory.push(Message::assistant(&content));
                 return content;
@@ -242,7 +284,7 @@ impl Agent {
 
             // Separate content from tool calls to avoid borrow issues
             let response_content = response.content;
-            let tool_calls = response.tool_calls;
+            let tool_calls = effective_tool_calls;
 
             // Store tool calls in memory — move instead of clone
             self.memory
@@ -372,6 +414,127 @@ impl Agent {
     }
 }
 
+/// Check if text content looks like the model is asking a question instead of acting.
+fn looks_like_question(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Ends with question mark (ASCII or full-width)
+    if trimmed.ends_with('?') || trimmed.ends_with('？') {
+        return true;
+    }
+    let lower = trimmed.to_lowercase();
+    let question_phrases = [
+        "shall i",
+        "should i",
+        "do you want",
+        "would you like",
+        "can i",
+        "may i",
+        "do you need",
+        "want me to",
+        "しますか",
+        "ますか",
+        "でしょうか",
+        "よろしいですか",
+        "しましょうか",
+    ];
+    question_phrases.iter().any(|p| lower.contains(p))
+}
+
+/// Try to extract tool calls from text content (for models that output JSON as text
+/// instead of using the tool calling API).
+fn try_extract_tool_calls_from_text(content: &str, tools: &ToolRegistry) -> Vec<ToolCall> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return vec![];
+    }
+
+    let json_objects = extract_json_objects(trimmed);
+    let mut result = Vec::new();
+    for (i, val) in json_objects.iter().enumerate() {
+        if let Some(tc) = parse_tool_call_json(val, tools, i) {
+            result.push(tc);
+        }
+    }
+    result
+}
+
+/// Scan text for top-level JSON objects using brace-depth counting.
+fn extract_json_objects(text: &str) -> Vec<serde_json::Value> {
+    let mut objects = Vec::new();
+    let mut depth = 0i32;
+    let mut start = None;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for (i, ch) in text.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escape_next = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match ch {
+            '{' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(s) = start {
+                        let candidate = &text[s..=i];
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(candidate) {
+                            objects.push(val);
+                        }
+                    }
+                    start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    objects
+}
+
+/// Parse a JSON value as a tool call if it matches known formats.
+/// Format A: {"name": "tool_name", "arguments": {...}}
+fn parse_tool_call_json(
+    val: &serde_json::Value,
+    tools: &ToolRegistry,
+    index: usize,
+) -> Option<ToolCall> {
+    let obj = val.as_object()?;
+
+    // Format A: {"name": "...", "arguments": {...}}
+    let name = obj.get("name").and_then(|n| n.as_str())?;
+    let arguments = obj.get("arguments")?;
+
+    // Only accept registered tool names
+    if tools.get(name).is_none() {
+        return None;
+    }
+
+    Some(ToolCall {
+        id: format!("fallback_{}", index),
+        name: name.to_string(),
+        arguments: arguments.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,13 +600,13 @@ mod tests {
     #[test]
     fn test_simple_text_response() {
         let llm = MockLlm::new(vec![LlmResponse {
-            content: Some("Hello! How can I help?".to_string()),
+            content: Some("Hello! I'm here to help.".to_string()),
             tool_calls: vec![],
             usage: TokenUsage::default(),
         }]);
         let mut agent = make_agent(Box::new(llm));
         let response = agent.process_message("Hi there");
-        assert_eq!(response, "Hello! How can I help?");
+        assert_eq!(response, "Hello! I'm here to help.");
     }
 
     #[test]
@@ -1836,5 +1999,193 @@ mod tests {
         assert_eq!(agent.stats.completion_tokens, 130);
         assert_eq!(agent.stats.tool_calls_ok, 1);
         assert_eq!(agent.stats.tool_calls_failed, 0);
+    }
+
+    // --- Tests for Pattern 2: JSON-as-text fallback ---
+
+    #[test]
+    fn test_text_to_tool_fallback_format_a() {
+        // Model outputs JSON as text instead of using tool calling API
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: Some(
+                    "I'll list the directory for you.\n\
+                     ```json\n\
+                     {\"name\": \"list_dir\", \"arguments\": {\"path\": \".\"}}\n\
+                     ```"
+                    .to_string(),
+                ),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // After fallback tool execution, model gives final answer
+            LlmResponse {
+                content: Some("Here are the files.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("List files");
+        assert_eq!(response, "Here are the files.");
+        assert_eq!(agent.stats.text_to_tool_fallbacks, 1);
+        assert_eq!(agent.stats.tool_calls_ok, 1);
+    }
+
+    #[test]
+    fn test_text_to_tool_fallback_unknown_tool_ignored() {
+        // JSON with unknown tool name should NOT be extracted
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: Some("{\"name\": \"delete_everything\", \"arguments\": {}}".to_string()),
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        }]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Do something");
+        // Should return the text as-is since the tool is unknown
+        assert!(response.contains("delete_everything"));
+        assert_eq!(agent.stats.text_to_tool_fallbacks, 0);
+    }
+
+    #[test]
+    fn test_text_to_tool_fallback_stats_tracked() {
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: Some(
+                    "{\"name\": \"list_dir\", \"arguments\": {\"path\": \".\"}}".to_string(),
+                ),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        agent.process_message("List");
+        assert_eq!(agent.stats.text_to_tool_fallbacks, 1);
+    }
+
+    // --- Tests for Pattern 1: Re-prompt on question ---
+
+    #[test]
+    fn test_reprompt_on_question() {
+        // Model asks a question, then after nudge uses a tool
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: Some("Do you want me to read the file?".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // After re-prompt, model uses tool
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("Here are the files.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Show files");
+        assert_eq!(response, "Here are the files.");
+        assert_eq!(agent.stats.reprompts, 1);
+    }
+
+    #[test]
+    fn test_reprompt_limit() {
+        // Model asks twice — second question should be returned as final answer
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: Some("Should I proceed?".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("Are you sure?".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Do it");
+        // After 1 re-prompt, the second question is returned as-is
+        assert_eq!(response, "Are you sure?");
+        assert_eq!(agent.stats.reprompts, 1);
+    }
+
+    #[test]
+    fn test_non_question_text_returned_immediately() {
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: Some("The answer is 42.".to_string()),
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        }]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("What is the answer?");
+        assert_eq!(response, "The answer is 42.");
+        assert_eq!(agent.stats.reprompts, 0);
+    }
+
+    // --- Unit tests for helper functions ---
+
+    #[test]
+    fn test_looks_like_question() {
+        // English questions
+        assert!(looks_like_question("Do you want me to edit?"));
+        assert!(looks_like_question("Should I proceed?"));
+        assert!(looks_like_question("Shall I read the file?"));
+        assert!(looks_like_question("Would you like me to help?"));
+        assert!(looks_like_question("Can I modify this?"));
+
+        // Japanese questions
+        assert!(looks_like_question("ファイルを編集しますか？"));
+        assert!(looks_like_question("編集しましょうか"));
+        assert!(looks_like_question("よろしいですか"));
+
+        // Not questions
+        assert!(!looks_like_question("The file has 42 lines."));
+        assert!(!looks_like_question("Here is the result."));
+        assert!(!looks_like_question("Done."));
+        assert!(!looks_like_question(""));
+    }
+
+    #[test]
+    fn test_extract_tool_calls_from_mixed_text() {
+        let tools = default_registry();
+        let content = "I'll read the file for you.\n\
+                       {\"name\": \"read_file\", \"arguments\": {\"path\": \"Cargo.toml\"}}\n";
+        let result = try_extract_tool_calls_from_text(content, &tools);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "read_file");
+        assert_eq!(result[0].id, "fallback_0");
+    }
+
+    #[test]
+    fn test_extract_non_tool_json_ignored() {
+        let tools = default_registry();
+        // JSON that doesn't match tool call format
+        let content = "{\"key\": \"value\", \"count\": 42}";
+        let result = try_extract_tool_calls_from_text(content, &tools);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_empty_content() {
+        let tools = default_registry();
+        let result = try_extract_tool_calls_from_text("", &tools);
+        assert!(result.is_empty());
+
+        let result = try_extract_tool_calls_from_text("just plain text", &tools);
+        assert!(result.is_empty());
     }
 }
