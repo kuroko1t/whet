@@ -1,0 +1,1 @@
+There is a recurring typo "recieve" (and its variants like "Recieve") in this directory. Find every occurrence across all files and fix it to the correct spelling "receive" (preserving the original case: "Recieve" → "Receive"). Do not introduce any other changes.

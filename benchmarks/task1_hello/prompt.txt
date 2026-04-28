@@ -1,0 +1,1 @@
+Read hello.py and add a `farewell(name)` function that returns the string `Goodbye, {name}!`. Keep the existing greet function and the `if __name__ == "__main__"` block intact.

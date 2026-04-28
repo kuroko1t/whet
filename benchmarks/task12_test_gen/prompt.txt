@@ -1,0 +1,8 @@
+calculator.py defines a Calculator class with five methods (add, subtract, divide, power, average). The accompanying test file test_calculator.py is empty. Write a comprehensive pytest test suite there that exercises every method including its edge cases. At a minimum, your suite must:
+
+- exercise every method on at least one happy-path input
+- assert that `divide(x, 0)` raises ZeroDivisionError
+- assert that `average([])` raises ValueError
+- assert that passing a non-numeric value (e.g. a string or None) raises TypeError on at least two methods
+
+Use pytest idioms (`pytest.raises`, parametrize where helpful). Do not modify calculator.py.

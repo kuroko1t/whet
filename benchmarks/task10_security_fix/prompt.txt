@@ -1,0 +1,7 @@
+users.py contains a real SQL injection vulnerability in `find_user`. Find it and fix it. Use parameterized queries (the `?` placeholder with a tuple of values) — do not just escape or filter the input.
+
+Constraints:
+- The existing tests in test_users.py must continue to pass unchanged.
+- `find_user("alice")` must still return exactly one row.
+- After your fix, calling `find_user("' OR '1'='1")` must return zero rows (right now it returns every row).
+- Do not modify test_users.py or init_db.py.

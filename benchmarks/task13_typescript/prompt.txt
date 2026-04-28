@@ -1,0 +1,8 @@
+This is a small TypeScript module. Add a `subtract(a: number, b: number): number` function to src/calc.ts (alongside the existing add and multiply) and add at least one test for it in src/calc.test.ts. The new test must use the same `node:test` style as the existing tests.
+
+Constraints:
+- The existing add and multiply tests must continue to pass unchanged.
+- `npx tsc --noEmit` must compile without type errors.
+- `subtract(5, 3)` must return `2`; `subtract(0, 4)` must return `-4`.
+- Do not modify package.json or tsconfig.json.
+- Dependencies are **already installed** in `./node_modules`. Do NOT run `npm install` — it would only modify package.json. You can verify your work directly with `npx tsc --noEmit` or `npx tsx --test src/calc.test.ts`.

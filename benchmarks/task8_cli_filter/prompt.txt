@@ -1,0 +1,8 @@
+This is a small task-manager CLI built with argparse. Read the existing files (store.py, handlers.py, cli.py, test_cli.py) to understand how subcommands are wired up.
+
+Add a `--status` filter option to the existing `list` subcommand so that:
+- `tasks list --status pending` prints only tasks where `done` is False
+- `tasks list --status done` prints only tasks where `done` is True
+- `tasks list` (no flag) keeps the current behaviour and prints every task
+
+Then add at least one new test case to test_cli.py that exercises the new filter (for example, asserting that pending tasks appear and done tasks do not when filtering by `pending`). The four existing tests must continue to pass and must not be removed or weakened. Use the same patterns the existing code already follows.

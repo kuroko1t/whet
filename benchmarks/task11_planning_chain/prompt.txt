@@ -1,0 +1,5 @@
+main.py, worker.py, and utils.py currently use bare `print()` calls for diagnostics. The test suite (test_pipeline.py) observes the pipeline through pytest's `caplog` fixture, so it expects `logging` records, not stdout. As a result the tests fail today.
+
+Migrate every `print()` call across main.py, worker.py, and utils.py to use the standard `logging` module. Each module must obtain a logger via `logging.getLogger(__name__)`. Choose log levels that fit the message: routine status → INFO (or DEBUG), invalid-input skip → WARNING. Do not modify test_pipeline.py.
+
+After your changes, `pytest -q test_pipeline.py` must pass and there must be no remaining `print(` calls in the three source files.

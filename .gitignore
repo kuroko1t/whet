@@ -11,3 +11,9 @@
 .idea/
 .vscode/
 __pycache__/
+
+# Benchmark run artefacts
+benchmarks/results/
+
+# Task13 pre-installed node_modules (recreated by `npm install` if missing)
+benchmarks/task13_typescript/workspace/node_modules/

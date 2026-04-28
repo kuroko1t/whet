@@ -1,0 +1,3 @@
+This project defines a small HTTP service. Read app.py and the routes/ package, then enumerate every HTTP endpoint the application exposes.
+
+Write your answer to a file named `ANSWER.md` in the workspace root. Use one endpoint per line in the form `METHOD /path` (e.g. `GET /users` or `POST /memos`). Do not modify any source file — only create ANSWER.md.

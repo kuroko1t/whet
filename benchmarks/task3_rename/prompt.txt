@@ -1,0 +1,1 @@
+Rename the function `compute` to `add` everywhere in this directory: in its definition (calc.py), in every caller (main.py), and in the test file (test_calc.py). Do not change behaviour and do not rename anything else (e.g. `double` must stay `double`). After your changes, `python test_calc.py` and `python main.py` must both run without errors.
