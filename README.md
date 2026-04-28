@@ -39,11 +39,16 @@ git clone https://github.com/kuroko1t/whet.git
 cd whet && cargo install --path .
 
 # 2. Pull a local model (or configure a cloud provider)
-ollama pull qwen3:8b
+ollama pull qwen3.6:35b-a3b-q4_K_M   # recommended for 16GB+ GPUs; see Benchmark below
 
 # 3. Start coding
-whet
+whet -m qwen3.6:35b-a3b-q4_K_M
 ```
+
+> **Picking a model**: `qwen3.6:35b-a3b-q4_K_M` was the strongest open-weight model
+> that ran on a 16GB GPU in our benchmark — see [Benchmark Results](#benchmark-results)
+> for the data, and for an even faster setup using the `UD-Q3_K_M` variant + KV
+> cache quantization.
 
 Or use with a cloud provider:
 
@@ -274,6 +279,54 @@ whet config                      # show current configuration
 | Permission system | 3 modes | Yes |
 | Session management | `--resume` / `--continue` | `--resume` / `--continue` |
 | Context compression | Yes (auto + manual) | Yes |
+
+## Benchmark Results
+
+Whet ships with a reproducible benchmark suite of 11 coding tasks covering
+single-file edits, multi-file refactors, planning chains, security fixes,
+TDD-style test generation, and one TypeScript task. Each task has a tamper-proof
+verifier (SHA-pinned tests where applicable, mutation testing for task12).
+
+The numbers below are from a single RTX 5060 Ti (16GB VRAM) running
+`scripts/run_bench.sh -n 3` with `temperature=0`, `seed=42`,
+`OLLAMA_KV_CACHE_TYPE=q8_0`, `OLLAMA_FLASH_ATTENTION=1`.
+
+| Model | Pass rate | Tasks fully passed | Avg time / task |
+|---|---|---|---|
+| **`qwen3.6:35b-a3b-q4_K_M`** (recommended) | **100%** (29/29) | **11/11** | 82s |
+| `gemma4:26b` | 61% (20/33) | 6/11 | 32s |
+| `devstral:24b` | 39% (13/33) | 4/11 | 71s |
+
+The `UD-Q3_K_M` variant of Qwen3.6-35B-A3B from
+[unsloth/Qwen3.6-35B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF)
+fits cleanly into 16GB VRAM (vs. ~7GB CPU offload for the standard Q4_K_M) and
+runs ~25% faster while retaining the same 11/11 pass rate. To use it:
+
+```bash
+# 1. Download the GGUF (~15GB)
+mkdir -p ~/models && curl -L -o ~/models/Qwen3.6-35B-A3B-UD-Q3_K_M.gguf \
+  "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q3_K_M.gguf"
+
+# 2. Register a Modelfile pointing at it
+printf 'FROM ~/models/Qwen3.6-35B-A3B-UD-Q3_K_M.gguf\nTEMPLATE {{ .Prompt }}\nRENDERER qwen3.5\nPARSER qwen3.5\n' \
+  | ollama create qwen3.6-q3 -f -
+
+# 3. Use it
+whet -m qwen3.6-q3
+```
+
+Caveats: the rankings are tied to **this specific GPU + 16GB VRAM**. On a
+24GB+ GPU the standard Q4_K_M is faster; on smaller GPUs only the lighter
+quants (e.g. `gemma4:e4b`) will fit. See `benchmarks/README.md` for the task
+spec, and `benchmarks/results/leaderboard.md` for the full per-task breakdown
+including tokens, iterations, and tool failures.
+
+To reproduce on your machine:
+
+```bash
+scripts/run_bench.sh -m <model[,model2,...]> -n 3
+cat benchmarks/results/leaderboard.md
+```
 
 ## Architecture
 
