@@ -17,3 +17,6 @@ benchmarks/results/
 
 # Task13 pre-installed node_modules (recreated by `npm install` if missing)
 benchmarks/task13_typescript/workspace/node_modules/
+
+# Blog drafts are published externally (e.g. dev.to), not managed in git.
+docs/blog/
