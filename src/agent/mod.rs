@@ -59,6 +59,22 @@ const MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
 const MAX_CONTEXT_MESSAGES: usize = 40;
 const SUMMARIZE_KEEP_RECENT: usize = 10;
 
+/// Tools that observe the workspace without modifying it. Used by the
+/// premature-exit detector: a turn that only invoked tools from this set
+/// hasn't actually acted on the user's request yet.
+const READ_ONLY_TOOLS: &[&str] = &[
+    "read_file",
+    "list_dir",
+    "repo_map",
+    "grep",
+    "web_fetch",
+    "web_search",
+];
+
+fn is_read_only_tool(name: &str) -> bool {
+    READ_ONLY_TOOLS.contains(&name)
+}
+
 pub struct Agent {
     pub llm: Box<dyn LlmProvider>,
     pub tools: ToolRegistry,
@@ -229,6 +245,11 @@ impl Agent {
 
         let mut reprompt_count: usize = 0;
         const MAX_REPROMPTS: usize = 1;
+        // Per-turn tool tracking. The premature-exit detector fires only when
+        // the model has invoked at least one read-only tool but no edit/write
+        // tool — i.e. it explored the workspace and then stopped.
+        let mut has_acted: bool = false;
+        let mut has_read: bool = false;
 
         for _iteration in 0..self.config.max_iterations {
             let response = match self.llm.chat_streaming(&self.memory, tool_defs, on_token) {
@@ -270,6 +291,33 @@ impl Agent {
                     self.memory.push(Message::user(
                         "Don't ask questions. Use your tools to take action directly. \
                          If you're unsure, start by reading files or exploring the project structure.",
+                    ));
+                    continue;
+                }
+                // Pattern 3: Re-prompt if model is exiting after only reads.
+                // Requires:
+                //   (a) the model invoked at least one read-only tool this turn,
+                //   (b) no edit/write/shell call ran this turn,
+                //   (c) the final response is empty.
+                // Read-only Q&A ("read file → answer in text") is unaffected
+                // because it produces non-empty content.
+                else if reprompt_count < MAX_REPROMPTS
+                    && has_read
+                    && !has_acted
+                    && content.trim().is_empty()
+                {
+                    eprintln!(
+                        "  {}",
+                        "[re-prompt: model stopped after only reads — pushing it to act]".yellow()
+                    );
+                    self.stats.reprompts += 1;
+                    reprompt_count += 1;
+                    self.memory.push(Message::assistant(&content));
+                    self.memory.push(Message::user(
+                        "You've only read files so far. Use your editing tools \
+                         (edit_file / apply_diff / write_file / shell) to make the \
+                         changes the task requires. If you've finished, state in plain \
+                         text what you did so the user can verify.",
                     ));
                     continue;
                 }
@@ -354,6 +402,13 @@ impl Agent {
                     };
 
                 self.stats.record_tool_call(tool_success);
+                if tool_success {
+                    if is_read_only_tool(&tool_call.name) {
+                        has_read = true;
+                    } else {
+                        has_acted = true;
+                    }
+                }
 
                 let result = if result.len() > MAX_TOOL_OUTPUT_CHARS {
                     let mut end = MAX_TOOL_OUTPUT_CHARS;
@@ -2133,6 +2188,133 @@ mod tests {
         let mut agent = make_agent(Box::new(llm));
         let response = agent.process_message("What is the answer?");
         assert_eq!(response, "The answer is 42.");
+        assert_eq!(agent.stats.reprompts, 0);
+    }
+
+    // --- Tests for Pattern 3: premature exit after only-reads ---
+
+    #[test]
+    fn test_reprompt_on_premature_exit_after_only_reads() {
+        // Model reads a file, then exits with empty content. Detector should
+        // re-prompt; on the second turn the model edits and we accept the answer.
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("hello.py");
+        std::fs::write(&target, "def greet():\n    return 'hi'\n").unwrap();
+        let target_path = target.display().to_string();
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": target_path}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Empty content + no tool calls: triggers premature-exit detector.
+            LlmResponse {
+                content: Some(String::new()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // After re-prompt, model finally writes.
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "edit_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": target_path,
+                        "old_text": "return 'hi'",
+                        "new_text": "return 'hello'"
+                    }),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("Make greet say hello");
+        assert_eq!(response, "Done.");
+        assert_eq!(agent.stats.reprompts, 1);
+    }
+
+    #[test]
+    fn test_no_reprompt_on_read_only_qa() {
+        // Read file, then return a substantive answer. The premature-exit
+        // detector must NOT fire (content is not empty).
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("readme.txt");
+        std::fs::write(&target, "Line 1\nLine 2\n").unwrap();
+        let target_path = target.display().to_string();
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": target_path}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("There are 2 lines.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message("How many lines in readme?");
+        assert_eq!(response, "There are 2 lines.");
+        assert_eq!(agent.stats.reprompts, 0);
+    }
+
+    #[test]
+    fn test_no_reprompt_after_edit_action() {
+        // Model edits successfully and exits with empty content — that is a
+        // valid "done with no closing remark" turn, not a premature exit.
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("a.txt");
+        std::fs::write(&target, "old\n").unwrap();
+        let target_path = target.display().to_string();
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": target_path}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "edit_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": target_path,
+                        "old_text": "old",
+                        "new_text": "new"
+                    }),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some(String::new()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let _response = agent.process_message("change old to new");
         assert_eq!(agent.stats.reprompts, 0);
     }
 
