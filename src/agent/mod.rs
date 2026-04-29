@@ -287,7 +287,28 @@ impl Agent {
         let mut has_acted: bool = false;
         let mut has_read: bool = false;
 
-        for _iteration in 0..self.config.max_iterations {
+        // Adaptive iteration cap: hit the configured cap, but if the model is
+        // still actively making progress (a successful tool call within the
+        // last 2 iterations), grant up to MAX_PROGRESS_EXTENSION extra cycles
+        // before forcing a stop. Avoids losing tasks that need a few more
+        // turns to land while still bounding runaway loops.
+        const MAX_PROGRESS_EXTENSION: usize = 5;
+        let base_cap = self.config.max_iterations;
+        let hard_cap = base_cap.saturating_add(MAX_PROGRESS_EXTENSION);
+        let mut iteration: usize = 0;
+        let mut last_progress_iter: usize = 0;
+
+        loop {
+            // Stop if we've exhausted both base + extension, OR we're past
+            // the base and recent iterations stopped making progress.
+            if iteration >= hard_cap {
+                break;
+            }
+            if iteration >= base_cap && iteration.saturating_sub(last_progress_iter) >= 2 {
+                break;
+            }
+            iteration += 1;
+            let _iteration = iteration;
             let response = match self.llm.chat_streaming(&self.memory, tool_defs, on_token) {
                 Ok(resp) => resp,
                 Err(e) => {
@@ -443,6 +464,7 @@ impl Agent {
 
                 self.stats.record_tool_call(tool_success);
                 if tool_success {
+                    last_progress_iter = iteration;
                     if is_read_only_tool(&tool_call.name) {
                         has_read = true;
                     } else {
@@ -862,6 +884,81 @@ mod tests {
         let response = agent.process_message("Hello");
         assert!(response.starts_with("Error:"));
         assert!(response.contains("Cannot connect to Ollama"));
+    }
+
+    #[test]
+    fn test_adaptive_cap_extends_when_making_progress() {
+        // Adaptive cap: with max_iterations=3 the loop should still finish a
+        // 5-tool-call sequence as long as each iteration makes progress
+        // (a successful tool call). Without the extension, we'd run out of
+        // budget at iter 3 and never see the final content.
+        let mut responses = Vec::new();
+        for i in 0..5 {
+            responses.push(LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: format!("call_{}", i),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            });
+        }
+        responses.push(LlmResponse {
+            content: Some("All done.".to_string()),
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        });
+        let llm = MockLlm::new(responses);
+        let config = AgentConfig {
+            max_iterations: 3,
+            ..AgentConfig::default()
+        };
+        let mut agent = Agent::new(Box::new(llm), default_registry(), config, &[]);
+        let response = agent.process_message("List things repeatedly");
+        // We extended past max_iterations=3 because every iteration made
+        // progress (list_dir succeeded). Final content reaches us.
+        assert_eq!(response, "All done.");
+        assert_eq!(agent.stats.llm_calls, 6);
+    }
+
+    #[test]
+    fn test_adaptive_cap_stops_when_progress_stalls() {
+        // Hard cap is base + MAX_PROGRESS_EXTENSION (5). Even with continuous
+        // failing tool calls, the loop must terminate by base + extension.
+        // With base 3 and 20 unknown-tool calls (each fails), we should stop
+        // around iter 8 with the "Max iterations reached" message, not run
+        // through all 20 responses.
+        let mut responses = Vec::new();
+        for i in 0..20 {
+            responses.push(LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: format!("call_{}", i),
+                    name: "nonexistent_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                usage: TokenUsage::default(),
+            });
+        }
+        let llm = MockLlm::new(responses);
+        let config = AgentConfig {
+            max_iterations: 3,
+            ..AgentConfig::default()
+        };
+        let mut agent = Agent::new(Box::new(llm), default_registry(), config, &[]);
+        let response = agent.process_message("Spam unknown tool");
+        assert_eq!(
+            response,
+            "Max iterations reached. The agent could not complete the task."
+        );
+        // Without the cap we'd run 20+. With base=3 and stall-extension=5,
+        // we stop within 3 (no progress at all → never even enters extension).
+        assert!(
+            agent.stats.llm_calls <= 8,
+            "expected ≤ 8 LLM calls, got {}",
+            agent.stats.llm_calls
+        );
     }
 
     #[test]
