@@ -20,3 +20,11 @@ benchmarks/task13_typescript/workspace/node_modules/
 
 # Blog drafts are published externally (e.g. dev.to), not managed in git.
 docs/blog/
+
+# Local-only dev tooling (eval-loop scripts, baselines, etc.) — not for the public repo.
+.dev/
+
+# Local-only AI assistant memory / instructions (Claude Code, etc.). The
+# project's own contributor guide lives elsewhere; these are personal scratch.
+CLAUDE.md
+CLAUDE.local.md
