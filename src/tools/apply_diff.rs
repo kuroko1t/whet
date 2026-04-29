@@ -57,8 +57,12 @@ impl Tool for ApplyDiffTool {
             ));
         }
 
-        let mut total_hunks = 0usize;
-        let mut paths_changed: Vec<String> = Vec::new();
+        // Per-file structured report.
+        // - `applied_paths`: files that we successfully wrote.
+        // - `failed_files`: files where at least one hunk could not be applied
+        //   (we DID NOT write these — atomic-per-file semantics).
+        let mut applied_paths: Vec<(String, usize)> = Vec::new(); // (path, hunks_applied)
+        let mut failed_files: Vec<(String, Vec<HunkOutcome>)> = Vec::new();
 
         for group in &groups {
             if group.hunks.is_empty() {
@@ -96,31 +100,79 @@ impl Tool for ApplyDiffTool {
                 ToolError::ExecutionFailed(format!("Failed to read '{}': {}", target, e))
             })?;
 
-            let new_content = apply_hunks(&content, &group.hunks)
-                .map_err(|e| ToolError::ExecutionFailed(format!("In '{}': {}", target, e)))?;
+            let (outcomes, new_content) = apply_hunks(&content, &group.hunks);
 
-            std::fs::write(target, &new_content).map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to write '{}': {}", target, e))
-            })?;
-
-            total_hunks += group.hunks.len();
-            if !paths_changed.iter().any(|p| p == target) {
-                paths_changed.push(target.to_string());
+            match new_content {
+                Some(new) => {
+                    std::fs::write(target, &new).map_err(|e| {
+                        ToolError::ExecutionFailed(format!("Failed to write '{}': {}", target, e))
+                    })?;
+                    applied_paths.push((target.to_string(), group.hunks.len()));
+                }
+                None => {
+                    // At least one hunk failed; leave the file untouched.
+                    failed_files.push((target.to_string(), outcomes));
+                }
             }
         }
 
-        if paths_changed.len() == 1 {
-            Ok(format!(
-                "Successfully applied {} hunk(s) to '{}'",
-                total_hunks, paths_changed[0]
-            ))
+        if failed_files.is_empty() {
+            let total_hunks: usize = applied_paths.iter().map(|(_, n)| n).sum();
+            if applied_paths.len() == 1 {
+                Ok(format!(
+                    "Successfully applied {} hunk(s) to '{}'",
+                    total_hunks, applied_paths[0].0
+                ))
+            } else {
+                let names: Vec<&str> = applied_paths.iter().map(|(p, _)| p.as_str()).collect();
+                Ok(format!(
+                    "Successfully applied {} hunk(s) across {} files: {}",
+                    total_hunks,
+                    applied_paths.len(),
+                    names.join(", ")
+                ))
+            }
         } else {
-            Ok(format!(
-                "Successfully applied {} hunk(s) across {} files: {}",
-                total_hunks,
-                paths_changed.len(),
-                paths_changed.join(", ")
-            ))
+            // Build a partial-failure report so the model can retry only the
+            // failing hunks. Files with no failures are listed at the top.
+            let mut msg = String::new();
+            if !applied_paths.is_empty() {
+                msg.push_str("Applied successfully:\n");
+                for (path, n) in &applied_paths {
+                    msg.push_str(&format!(
+                        "  ✓ {} ({} hunk{})\n",
+                        path,
+                        n,
+                        if *n == 1 { "" } else { "s" }
+                    ));
+                }
+            }
+            msg.push_str("Failed (file left unchanged):\n");
+            for (path, outcomes) in &failed_files {
+                msg.push_str(&format!("  ✗ {}:\n", path));
+                for (i, outcome) in outcomes.iter().enumerate() {
+                    let label = match outcome {
+                        HunkOutcome::Applied { old_start } => format!(
+                            "    hunk {} (line {}): anchor found (would apply, but rolled back because another hunk in this file failed)",
+                            i + 1,
+                            old_start
+                        ),
+                        HunkOutcome::Failed { old_start, reason } => format!(
+                            "    hunk {} (line {}): {}",
+                            i + 1,
+                            old_start,
+                            reason
+                        ),
+                    };
+                    msg.push_str(&label);
+                    msg.push('\n');
+                }
+            }
+            msg.push_str(
+                "Retry only the failing hunks with corrected anchors. \
+                 Successful files have already been written.",
+            );
+            Err(ToolError::ExecutionFailed(msg))
         }
     }
 }
@@ -142,6 +194,13 @@ enum DiffLine {
     Context(String),
     Remove(String),
     Add(String),
+}
+
+/// Per-hunk apply outcome, used to build a report when some hunks fail.
+#[derive(Debug)]
+enum HunkOutcome {
+    Applied { old_start: usize },
+    Failed { old_start: usize, reason: String },
 }
 
 /// Parse a unified diff into groups by file. Each `--- <path>` header starts a new
@@ -264,10 +323,16 @@ fn parse_hunk_header(line: &str) -> Result<usize, ToolError> {
     Ok(old_start)
 }
 
-fn apply_hunks(content: &str, hunks: &[DiffHunk]) -> Result<String, ToolError> {
+/// Try to apply every hunk and report per-hunk outcome. The returned content
+/// is only valid when every hunk applied; it's `None` if any hunk failed (the
+/// caller should not write a partially-applied file). The `outcomes` vector
+/// always has one entry per input hunk, in order.
+fn apply_hunks(content: &str, hunks: &[DiffHunk]) -> (Vec<HunkOutcome>, Option<String>) {
     let original_lines: Vec<&str> = content.lines().collect();
     let mut result_lines: Vec<String> = Vec::new();
     let mut current_line = 0usize; // 0-based index into original_lines
+    let mut outcomes: Vec<HunkOutcome> = Vec::with_capacity(hunks.len());
+    let mut all_applied = true;
 
     for hunk in hunks {
         // Build the anchor: the sequence of context+remove lines we must find in the file.
@@ -283,14 +348,19 @@ fn apply_hunks(content: &str, hunks: &[DiffHunk]) -> Result<String, ToolError> {
         let hint = hunk.old_start.saturating_sub(1);
         let actual_start = if anchor.is_empty() {
             // Pure-add hunk: drop the new lines at the hint position, clamped to file end.
-            hint.min(original_lines.len()).max(current_line)
+            Some(hint.min(original_lines.len()).max(current_line))
         } else {
-            find_anchor(&original_lines, &anchor, current_line, hint).ok_or_else(|| {
-                ToolError::ExecutionFailed(format!(
-                    "Could not locate hunk anchored at line {} (context lines do not match the file)",
-                    hunk.old_start
-                ))
-            })?
+            find_anchor(&original_lines, &anchor, current_line, hint)
+        };
+
+        let Some(actual_start) = actual_start else {
+            outcomes.push(HunkOutcome::Failed {
+                old_start: hunk.old_start,
+                reason: "context lines do not match the file".to_string(),
+            });
+            all_applied = false;
+            // Skip this hunk; continue trying the rest so the model gets a full report.
+            continue;
         };
 
         // Copy lines between previous cursor and the anchor.
@@ -303,13 +373,10 @@ fn apply_hunks(content: &str, hunks: &[DiffHunk]) -> Result<String, ToolError> {
         for diff_line in &hunk.lines {
             match diff_line {
                 DiffLine::Context(_) => {
-                    // Use the original file's line to preserve exact whitespace.
                     if current_line < original_lines.len() {
                         result_lines.push(original_lines[current_line].to_string());
                         current_line += 1;
                     }
-                    // If we're past EOF a context line is treated as an implicit no-op
-                    // (this handles trailing-blank-line context in append-style hunks).
                 }
                 DiffLine::Remove(_) => {
                     if current_line < original_lines.len() {
@@ -321,6 +388,13 @@ fn apply_hunks(content: &str, hunks: &[DiffHunk]) -> Result<String, ToolError> {
                 }
             }
         }
+        outcomes.push(HunkOutcome::Applied {
+            old_start: hunk.old_start,
+        });
+    }
+
+    if !all_applied {
+        return (outcomes, None);
     }
 
     // Tail of the original file.
@@ -334,7 +408,7 @@ fn apply_hunks(content: &str, hunks: &[DiffHunk]) -> Result<String, ToolError> {
         result.push('\n');
     }
 
-    Ok(result)
+    (outcomes, Some(result))
 }
 
 /// Locate the position in `lines` where `anchor` matches (after trim). Search starts
@@ -922,8 +996,77 @@ mod tests {
         }));
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Could not locate hunk"), "msg was: {}", msg);
+        assert!(
+            msg.contains("context lines do not match"),
+            "msg was: {}",
+            msg
+        );
+        // File must be left untouched.
+        let content = fs::read_to_string(path).unwrap();
+        assert_eq!(content, "alpha\nbeta\n");
 
         cleanup(path);
+    }
+
+    #[test]
+    fn test_partial_failure_reports_per_hunk_outcomes() {
+        // Two hunks: the first has a valid anchor, the second's anchor is bogus.
+        // The file must be left unchanged (atomic-per-file) and the error
+        // must enumerate every hunk so the model can retry only the failing one.
+        let path = "/tmp/whet_test_diff_partial.txt";
+        setup_test_file(path, "alpha\nbeta\ngamma\n");
+
+        let diff = "@@ -1,1 +1,1 @@\n-alpha\n+ALPHA\n@@ -3,1 +3,1 @@\n-NEVER\n+ZZZ";
+        let tool = ApplyDiffTool;
+        let result = tool.execute(json!({"path": path, "diff": diff}));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+
+        assert!(msg.contains("hunk 1"), "msg was: {}", msg);
+        assert!(msg.contains("hunk 2"), "msg was: {}", msg);
+        assert!(msg.contains("anchor found"), "msg was: {}", msg);
+        assert!(
+            msg.contains("context lines do not match"),
+            "msg was: {}",
+            msg
+        );
+
+        // File must be untouched — atomic-per-file rollback.
+        let content = fs::read_to_string(path).unwrap();
+        assert_eq!(content, "alpha\nbeta\ngamma\n");
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_multi_file_partial_writes_succeeded_skips_failed() {
+        // File A's hunk applies cleanly; File B's hunk has a bogus anchor.
+        // File A must be written; File B must be untouched. The error must
+        // mention both files distinctly.
+        let dir = tempfile::TempDir::new().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        std::fs::write(&a, "one\n").unwrap();
+        std::fs::write(&b, "two\n").unwrap();
+
+        let diff = format!(
+            "--- {}\n@@ -1,1 +1,1 @@\n-one\n+ONE\n--- {}\n@@ -1,1 +1,1 @@\n-NEVER\n+ZZZ",
+            a.display(),
+            b.display()
+        );
+        let tool = ApplyDiffTool;
+        let result = tool.execute(json!({"path": a.display().to_string(), "diff": diff}));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+
+        // File A was written.
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "ONE\n");
+        // File B was left alone.
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "two\n");
+
+        assert!(msg.contains("Applied successfully"), "msg was: {}", msg);
+        assert!(msg.contains("a.txt"), "msg was: {}", msg);
+        assert!(msg.contains("Failed"), "msg was: {}", msg);
+        assert!(msg.contains("b.txt"), "msg was: {}", msg);
     }
 }
