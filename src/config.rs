@@ -165,38 +165,47 @@ impl Config {
         toml::to_string_pretty(self)
     }
 
-    /// Load config from ~/.whet/config.toml, falling back to defaults.
+    /// Load config from `<home>/.whet/config.toml`, falling back to defaults.
+    ///
+    /// `WHET_CONFIG_HOME` overrides the home directory at runtime (for users
+    /// running multiple isolated profiles); tests should call `load_from`
+    /// directly with a tempdir to avoid env-var races under parallel runs.
     pub fn load() -> Self {
-        let config_path = if let Some(home) = dirs::home_dir() {
-            home.join(".whet").join("config.toml")
-        } else {
-            return Self::default();
-        };
+        let home = std::env::var_os("WHET_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(dirs::home_dir);
+        match home {
+            Some(h) => Self::load_from(&h),
+            None => Self::default(),
+        }
+    }
 
-        if config_path.exists() {
-            match std::fs::read_to_string(&config_path) {
-                Ok(contents) => match toml::from_str(&contents) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: Failed to parse {}: {}. Using defaults.",
-                            config_path.display(),
-                            e
-                        );
-                        Self::default()
-                    }
-                },
+    /// Load config from `<home>/.whet/config.toml` for an explicit home dir.
+    pub fn load_from(home: &std::path::Path) -> Self {
+        let config_path = home.join(".whet").join("config.toml");
+        if !config_path.exists() {
+            return Self::default();
+        }
+        match std::fs::read_to_string(&config_path) {
+            Ok(contents) => match toml::from_str(&contents) {
+                Ok(config) => config,
                 Err(e) => {
                     eprintln!(
-                        "Warning: Failed to read {}: {}. Using defaults.",
+                        "Warning: Failed to parse {}: {}. Using defaults.",
                         config_path.display(),
                         e
                     );
                     Self::default()
                 }
+            },
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to read {}: {}. Using defaults.",
+                    config_path.display(),
+                    e
+                );
+                Self::default()
             }
-        } else {
-            Self::default()
         }
     }
 }
@@ -292,8 +301,48 @@ database_path = "test.db"
 
     #[test]
     fn test_config_load_returns_defaults_when_no_file() {
-        // load() should return defaults when config file doesn't exist
-        let config = Config::load();
+        // Empty tempdir → no .whet/config.toml → defaults.
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config::load_from(dir.path());
+        assert_eq!(config.llm.model, "qwen3:8b");
+    }
+
+    #[test]
+    fn test_config_load_reads_existing_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let whet_dir = dir.path().join(".whet");
+        std::fs::create_dir(&whet_dir).unwrap();
+        std::fs::write(
+            whet_dir.join("config.toml"),
+            r#"
+[llm]
+provider = "ollama"
+model = "custom-model"
+base_url = "http://localhost:11434"
+
+[agent]
+max_iterations = 7
+
+[memory]
+database_path = "test.db"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(dir.path());
+        assert_eq!(config.llm.model, "custom-model");
+        assert_eq!(config.agent.max_iterations, 7);
+    }
+
+    #[test]
+    fn test_config_load_falls_back_when_file_invalid() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let whet_dir = dir.path().join(".whet");
+        std::fs::create_dir(&whet_dir).unwrap();
+        std::fs::write(whet_dir.join("config.toml"), "this is not toml = ===").unwrap();
+
+        let config = Config::load_from(dir.path());
+        // Falls back to defaults rather than panicking.
         assert_eq!(config.llm.model, "qwen3:8b");
     }
 
