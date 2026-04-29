@@ -629,9 +629,7 @@ fn parse_tool_call_json(
     let arguments = obj.get("arguments")?;
 
     // Only accept registered tool names
-    if tools.get(name).is_none() {
-        return None;
-    }
+    tools.get(name)?;
 
     Some(ToolCall {
         id: format!("fallback_{}", index),

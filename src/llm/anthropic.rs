@@ -380,21 +380,17 @@ impl LlmProvider for AnthropicClient {
                         }
                     }
                 }
-                "content_block_stop" => {
-                    if !current_tool_name.is_empty() {
-                        let arguments: serde_json::Value =
-                            serde_json::from_str(&current_tool_input).unwrap_or_else(|_| {
-                                serde_json::Value::Object(serde_json::Map::new())
-                            });
-                        tool_calls.push(ToolCall {
-                            id: current_tool_id.clone(),
-                            name: current_tool_name.clone(),
-                            arguments,
-                        });
-                        current_tool_id.clear();
-                        current_tool_name.clear();
-                        current_tool_input.clear();
-                    }
+                "content_block_stop" if !current_tool_name.is_empty() => {
+                    let arguments: serde_json::Value = serde_json::from_str(&current_tool_input)
+                        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+                    tool_calls.push(ToolCall {
+                        id: current_tool_id.clone(),
+                        name: current_tool_name.clone(),
+                        arguments,
+                    });
+                    current_tool_id.clear();
+                    current_tool_name.clear();
+                    current_tool_input.clear();
                 }
                 "message_stop" => {
                     break;
