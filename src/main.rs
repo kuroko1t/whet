@@ -211,6 +211,7 @@ fn setup_agent(cfg: &Config, model: &str, skills: &[Skill], yolo: bool) -> Agent
         permission_mode,
         plan_mode: false,
         context_compression: cfg.agent.context_compression,
+        stats_jsonl_path: std::env::var_os("WHET_STATS_JSONL").map(std::path::PathBuf::from),
     };
 
     Agent::new(provider, registry, agent_config, skills)

@@ -107,8 +107,39 @@ def classify_failure(rec):
 
 
 def parse_tool_calls(stats_text):
-    """Return list of tool names invoked, in order."""
+    """Return list of tool names invoked, in order (regex on stats.log)."""
     return re.findall(r"\[tool: (\w+)\]", stats_text)
+
+
+def tool_calls_for_run(run_dir: Path):
+    """Return list of tool names invoked, preferring the structured events.jsonl
+    sink (newer runs) and falling back to the regex over stats.log (older runs).
+    Returns [] if neither source is available."""
+    logs_dir = Path(str(run_dir) + ".logs")
+    events_path = (
+        logs_dir / "events.jsonl" if logs_dir.is_dir() else run_dir / ".events.jsonl"
+    )
+    if events_path.exists():
+        names = []
+        for line in events_path.read_text(errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("event") == "tool_call":
+                names.append(obj.get("name", ""))
+        return names
+    stats = (
+        (logs_dir / "stats.log")
+        if logs_dir.is_dir()
+        else (run_dir / ".stats.log")
+    )
+    if not stats.exists():
+        return []
+    return parse_tool_calls(stats.read_text(errors="replace"))
 
 
 def main():
@@ -169,11 +200,7 @@ def main():
         if (latest_ts[key] - parse_ts(r["ts"])).total_seconds() > 300:
             continue
         run_dir = Path(r.get("run_dir", ""))
-        logs_dir = Path(str(run_dir) + ".logs")
-        stats = (logs_dir / "stats.log") if logs_dir.is_dir() else (run_dir / ".stats.log")
-        if not stats.exists():
-            continue
-        for tool in parse_tool_calls(stats.read_text(errors="replace")):
+        for tool in tool_calls_for_run(run_dir):
             tool_usage[key][tool] += 1
 
     out = OUT_DIR / "tool-usage.csv"

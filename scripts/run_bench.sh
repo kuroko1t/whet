@@ -100,13 +100,16 @@ run_one() {
     local stats_log="$logs_dir/stats.log"
     local stdout_log="$logs_dir/stdout.log"
     local verify_log="$logs_dir/verify.log"
+    local events_jsonl="$logs_dir/events.jsonl"
     local prompt
     prompt=$(cat "$task_dir/prompt.txt")
 
     local t0 t1 dur whet_rc verify_rc
     t0=$(date +%s.%N)
     (
-        cd "$run_dir" && "$WHET_BIN" -y -m "$model" -p "$prompt" >"$stdout_log" 2>"$stats_log"
+        cd "$run_dir" \
+            && WHET_STATS_JSONL="$events_jsonl" \
+               "$WHET_BIN" -y -m "$model" -p "$prompt" >"$stdout_log" 2>"$stats_log"
     )
     whet_rc=$?
     t1=$(date +%s.%N)

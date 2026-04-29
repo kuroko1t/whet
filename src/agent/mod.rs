@@ -94,6 +94,9 @@ pub struct AgentConfig {
     pub permission_mode: PermissionMode,
     pub plan_mode: bool,
     pub context_compression: bool,
+    /// If set, structured per-event session stats are appended as JSON Lines.
+    /// One object per tool call plus a final `session_end` summary line.
+    pub stats_jsonl_path: Option<std::path::PathBuf>,
 }
 
 impl Default for AgentConfig {
@@ -104,8 +107,41 @@ impl Default for AgentConfig {
             permission_mode: PermissionMode::Default,
             plan_mode: false,
             context_compression: true,
+            stats_jsonl_path: None,
         }
     }
+}
+
+/// Append a single JSON object as a line to the stats JSONL sink, if enabled.
+/// Failures are deliberately silent — observability must never break the agent.
+fn write_stats_event(path: &Option<std::path::PathBuf>, event: serde_json::Value) {
+    if let Some(p) = path {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", event);
+        }
+    }
+}
+
+fn emit_session_end(path: &Option<std::path::PathBuf>, stats: &SessionStats, reason: &str) {
+    write_stats_event(
+        path,
+        serde_json::json!({
+            "event": "session_end",
+            "reason": reason,
+            "llm_calls": stats.llm_calls,
+            "prompt_tokens": stats.prompt_tokens,
+            "completion_tokens": stats.completion_tokens,
+            "tool_calls_ok": stats.tool_calls_ok,
+            "tool_calls_failed": stats.tool_calls_failed,
+            "text_to_tool_fallbacks": stats.text_to_tool_fallbacks,
+            "reprompts": stats.reprompts,
+        }),
+    );
 }
 
 impl Agent {
@@ -254,7 +290,10 @@ impl Agent {
         for _iteration in 0..self.config.max_iterations {
             let response = match self.llm.chat_streaming(&self.memory, tool_defs, on_token) {
                 Ok(resp) => resp,
-                Err(e) => return format!("Error: {}", e),
+                Err(e) => {
+                    emit_session_end(&self.config.stats_jsonl_path, &self.stats, "llm_error");
+                    return format!("Error: {}", e);
+                }
             };
 
             self.stats.record_llm_call(&response.usage);
@@ -327,6 +366,7 @@ impl Agent {
             if effective_tool_calls.is_empty() {
                 let content = response.content.unwrap_or_default();
                 self.memory.push(Message::assistant(&content));
+                emit_session_end(&self.config.stats_jsonl_path, &self.stats, "answered");
                 return content;
             }
 
@@ -409,6 +449,15 @@ impl Agent {
                         has_acted = true;
                     }
                 }
+                write_stats_event(
+                    &self.config.stats_jsonl_path,
+                    serde_json::json!({
+                        "event": "tool_call",
+                        "name": tool_call.name,
+                        "args": tool_call.arguments,
+                        "ok": tool_success,
+                    }),
+                );
 
                 let result = if result.len() > MAX_TOOL_OUTPUT_CHARS {
                     let mut end = MAX_TOOL_OUTPUT_CHARS;
@@ -432,6 +481,7 @@ impl Agent {
             let _ = response_content;
         }
 
+        emit_session_end(&self.config.stats_jsonl_path, &self.stats, "max_iterations");
         "Max iterations reached. The agent could not complete the task.".to_string()
     }
 
@@ -650,6 +700,14 @@ mod tests {
 
     fn make_agent(llm: Box<dyn LlmProvider>) -> Agent {
         Agent::new(llm, default_registry(), AgentConfig::default(), &[])
+    }
+
+    fn make_agent_with_jsonl(llm: Box<dyn LlmProvider>, path: std::path::PathBuf) -> Agent {
+        let cfg = AgentConfig {
+            stats_jsonl_path: Some(path),
+            ..AgentConfig::default()
+        };
+        Agent::new(llm, default_registry(), cfg, &[])
     }
 
     #[test]
@@ -2189,6 +2247,66 @@ mod tests {
         let response = agent.process_message("What is the answer?");
         assert_eq!(response, "The answer is 42.");
         assert_eq!(agent.stats.reprompts, 0);
+    }
+
+    // --- Tests for stats JSONL output ---
+
+    #[test]
+    fn test_stats_jsonl_emits_tool_call_and_session_end() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("a.txt");
+        std::fs::write(&target, "hi\n").unwrap();
+        let target_path = target.display().to_string();
+        let jsonl_path = dir.path().join("stats.jsonl");
+
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": target_path}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("done".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent_with_jsonl(Box::new(llm), jsonl_path.clone());
+        let _ = agent.process_message("read it");
+
+        let body = std::fs::read_to_string(&jsonl_path).unwrap();
+        let events: Vec<serde_json::Value> = body
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("invalid JSON line"))
+            .collect();
+        // Expect: 1 tool_call event + 1 session_end event.
+        assert_eq!(events.len(), 2, "events: {:?}", events);
+        assert_eq!(events[0]["event"], "tool_call");
+        assert_eq!(events[0]["name"], "read_file");
+        assert_eq!(events[0]["ok"], true);
+        assert_eq!(events[1]["event"], "session_end");
+        assert_eq!(events[1]["reason"], "answered");
+        assert_eq!(events[1]["tool_calls_ok"], 1);
+    }
+
+    #[test]
+    fn test_stats_jsonl_disabled_writes_nothing() {
+        // Default config has stats_jsonl_path: None — no file should be created.
+        let dir = tempfile::TempDir::new().unwrap();
+        let unused = dir.path().join("nope.jsonl");
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: Some("hi".to_string()),
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        }]);
+        let mut agent = make_agent(Box::new(llm));
+        let _ = agent.process_message("hi");
+        assert!(!unused.exists());
     }
 
     // --- Tests for Pattern 3: premature exit after only-reads ---
