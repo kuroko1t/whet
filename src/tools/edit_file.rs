@@ -6,6 +6,23 @@ const MAX_FILE_SIZE: u64 = 10_000_000; // 10MB
 
 pub struct EditFileTool;
 
+/// Outcome of locating `old_text` inside the file content.
+enum MatchResult {
+    /// Exact byte-for-byte match at a unique position.
+    Exact { byte_start: usize },
+    /// Per-line whitespace-normalized match at a unique line range.
+    Fuzzy {
+        line_start: usize,
+        line_count: usize,
+    },
+    /// Multiple exact matches — caller must add more context.
+    AmbiguousExact(usize),
+    /// Multiple fuzzy matches — caller must add more context.
+    AmbiguousFuzzy(usize),
+    /// No match at any tier.
+    NotFound,
+}
+
 impl Tool for EditFileTool {
     fn name(&self) -> &str {
         "edit_file"
@@ -67,32 +84,109 @@ impl Tool for EditFileTool {
         let content = std::fs::read_to_string(path)
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read '{}': {}", path, e)))?;
 
-        let count = content.matches(old_text).count();
-
-        match count {
-            0 => Err(ToolError::ExecutionFailed(
-                "old_text not found in file".to_string(),
-            )),
-            1 => {
-                let new_content = content.replacen(old_text, new_text, 1);
+        match locate_match(&content, old_text) {
+            MatchResult::Exact { byte_start } => {
+                let mut new_content = String::with_capacity(content.len() + new_text.len());
+                new_content.push_str(&content[..byte_start]);
+                new_content.push_str(new_text);
+                new_content.push_str(&content[byte_start + old_text.len()..]);
                 std::fs::write(path, &new_content).map_err(|e| {
                     ToolError::ExecutionFailed(format!("Failed to write '{}': {}", path, e))
                 })?;
-
-                // Show context around the change
-                let change_pos = new_content.find(new_text).unwrap_or(0);
-                let context = get_context(&new_content, change_pos, new_text.len());
-
+                let context = get_context(&new_content, byte_start, new_text.len());
                 Ok(format!(
                     "Successfully edited '{}'. Context around change:\n{}",
                     path, context
                 ))
             }
-            n => Err(ToolError::ExecutionFailed(format!(
+            MatchResult::Fuzzy {
+                line_start,
+                line_count,
+            } => {
+                let mut content_lines: Vec<&str> = content.split('\n').collect();
+                let new_text_lines: Vec<&str> = new_text.split('\n').collect();
+                content_lines.splice(
+                    line_start..line_start + line_count,
+                    new_text_lines.iter().copied(),
+                );
+                let new_content = content_lines.join("\n");
+                std::fs::write(path, &new_content).map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Failed to write '{}': {}", path, e))
+                })?;
+                let preview_pos = new_content
+                    .split('\n')
+                    .take(line_start)
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>()
+                    .min(new_content.len());
+                let preview_len = new_text_lines.iter().map(|l| l.len() + 1).sum::<usize>();
+                let context = get_context(&new_content, preview_pos, preview_len);
+                Ok(format!(
+                    "Successfully edited '{}' (fuzzy whitespace match). Context around change:\n{}",
+                    path, context
+                ))
+            }
+            MatchResult::AmbiguousExact(n) => Err(ToolError::ExecutionFailed(format!(
                 "old_text appears {} times; provide more context to make it unique",
                 n
             ))),
+            MatchResult::AmbiguousFuzzy(n) => Err(ToolError::ExecutionFailed(format!(
+                "old_text matched {} locations after whitespace normalization; provide more context to disambiguate",
+                n
+            ))),
+            MatchResult::NotFound => Err(ToolError::ExecutionFailed(
+                "old_text not found in file (tried exact and whitespace-normalized matching)".to_string(),
+            )),
         }
+    }
+}
+
+/// Locate `old_text` in `content`, falling back from exact to per-line trim match.
+fn locate_match(content: &str, old_text: &str) -> MatchResult {
+    // Tier 1: exact byte match.
+    let exact_count = content.matches(old_text).count();
+    match exact_count {
+        1 => {
+            let byte_start = content
+                .find(old_text)
+                .expect("count==1 implies find returns Some");
+            return MatchResult::Exact { byte_start };
+        }
+        n if n > 1 => return MatchResult::AmbiguousExact(n),
+        _ => {} // 0 → fall through to fuzzy
+    }
+
+    // Tier 2: whitespace-normalized per-line match.
+    let content_lines: Vec<&str> = content.split('\n').collect();
+    let old_lines: Vec<&str> = old_text.split('\n').collect();
+
+    // Skip fuzzy if old_text has no usable content (avoid matching anywhere).
+    if old_lines.is_empty() || old_lines.iter().all(|l| l.trim().is_empty()) {
+        return MatchResult::NotFound;
+    }
+    if old_lines.len() > content_lines.len() {
+        return MatchResult::NotFound;
+    }
+
+    let n = old_lines.len();
+    let mut matches: Vec<usize> = Vec::new();
+    for start in 0..=content_lines.len() - n {
+        let all_match = content_lines[start..start + n]
+            .iter()
+            .zip(old_lines.iter())
+            .all(|(c, o)| c.trim() == o.trim());
+        if all_match {
+            matches.push(start);
+        }
+    }
+
+    match matches.len() {
+        0 => MatchResult::NotFound,
+        1 => MatchResult::Fuzzy {
+            line_start: matches[0],
+            line_count: n,
+        },
+        m => MatchResult::AmbiguousFuzzy(m),
     }
 }
 
@@ -397,6 +491,150 @@ mod tests {
 
         let content = fs::read_to_string(&target).unwrap();
         assert!(content.contains("Hi World"));
+    }
+
+    #[test]
+    fn test_fuzzy_tabs_vs_spaces() {
+        // File uses 4-space indent; model emits tab indent. Tier-2 should rescue.
+        let path = "/tmp/whet_test_fuzzy_tabs.txt";
+        setup_test_file(
+            path,
+            "def greet():\n    print(\"hi\")\n\ndef farewell():\n    print(\"bye\")\n",
+        );
+
+        let tool = EditFileTool;
+        let result = tool
+            .execute(json!({
+                "path": path,
+                "old_text": "def greet():\n\tprint(\"hi\")",
+                "new_text": "def greet():\n    print(\"hello\")"
+            }))
+            .unwrap();
+        assert!(result.contains("fuzzy whitespace match"));
+
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("print(\"hello\")"));
+        assert!(content.contains("def farewell():"));
+        assert!(content.contains("print(\"bye\")"));
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_fuzzy_trailing_whitespace() {
+        // Model emits old_text with trailing space the file doesn't have.
+        let path = "/tmp/whet_test_fuzzy_trailing.txt";
+        setup_test_file(path, "alpha\nbeta\ngamma\n");
+
+        let tool = EditFileTool;
+        let result = tool
+            .execute(json!({
+                "path": path,
+                "old_text": "beta   ",
+                "new_text": "BETA"
+            }))
+            .unwrap();
+        assert!(result.contains("fuzzy whitespace match"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "alpha\nBETA\ngamma\n");
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_fuzzy_indent_depth_difference() {
+        // Model dropped a level of indentation (4 spaces → 0 spaces).
+        let path = "/tmp/whet_test_fuzzy_indent.txt";
+        setup_test_file(path, "class A:\n    def m(self):\n        return 1\n");
+
+        let tool = EditFileTool;
+        let result = tool
+            .execute(json!({
+                "path": path,
+                "old_text": "def m(self):\n    return 1",
+                "new_text": "def m(self):\n    return 2"
+            }))
+            .unwrap();
+        assert!(result.contains("fuzzy whitespace match"));
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("return 2"));
+        assert!(!content.contains("return 1"));
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_fuzzy_ambiguous_match_errors() {
+        // Two trim-equivalent locations → reject rather than picking blindly.
+        let path = "/tmp/whet_test_fuzzy_ambig.txt";
+        setup_test_file(path, "    foo\n    bar\nbaz\n\tfoo\n\tbar\n");
+
+        let tool = EditFileTool;
+        let result = tool.execute(json!({
+            "path": path,
+            "old_text": "foo\nbar",
+            "new_text": "X"
+        }));
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("after whitespace normalization"));
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_fuzzy_falls_back_only_when_exact_misses() {
+        // Exact match exists → fuzzy must NOT engage (otherwise an unexpected
+        // second fuzzy match could shadow the unique exact one).
+        let path = "/tmp/whet_test_exact_priority.txt";
+        setup_test_file(path, "foo\nbar\n  foo\n  bar\n");
+
+        let tool = EditFileTool;
+        let result = tool
+            .execute(json!({
+                "path": path,
+                "old_text": "foo\nbar",
+                "new_text": "X\nY"
+            }))
+            .unwrap();
+        // Exact-match path is taken — message must not mention the fuzzy fallback.
+        assert!(!result.contains("fuzzy whitespace match"));
+        let content = fs::read_to_string(path).unwrap();
+        assert_eq!(content, "X\nY\n  foo\n  bar\n");
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_fuzzy_not_found_message_is_explicit() {
+        let path = "/tmp/whet_test_fuzzy_nomatch.txt";
+        setup_test_file(path, "hello\n");
+
+        let tool = EditFileTool;
+        let err = tool
+            .execute(json!({
+                "path": path,
+                "old_text": "completely different",
+                "new_text": "x"
+            }))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not found"));
+        assert!(msg.contains("whitespace-normalized"));
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_fuzzy_blank_old_text_does_not_match_anywhere() {
+        // Whitespace-only old_text would otherwise match every line — guard against it.
+        let path = "/tmp/whet_test_fuzzy_blank.txt";
+        setup_test_file(path, "alpha\nbeta\n");
+
+        let tool = EditFileTool;
+        let err = tool
+            .execute(json!({
+                "path": path,
+                "old_text": "   ",
+                "new_text": "X"
+            }))
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
+        // File untouched.
+        assert_eq!(fs::read_to_string(path).unwrap(), "alpha\nbeta\n");
+        cleanup(path);
     }
 
     #[test]
