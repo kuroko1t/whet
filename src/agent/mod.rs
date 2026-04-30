@@ -308,7 +308,6 @@ impl Agent {
                 break;
             }
             iteration += 1;
-            let _iteration = iteration;
             let response = match self.llm.chat_streaming(&self.memory, tool_defs, on_token) {
                 Ok(resp) => resp,
                 Err(e) => {
