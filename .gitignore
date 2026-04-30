@@ -28,3 +28,6 @@ docs/blog/
 # project's own contributor guide lives elsewhere; these are personal scratch.
 CLAUDE.md
 CLAUDE.local.md
+
+# Playwright MCP scratch directory (browser console logs from web automation).
+.playwright-mcp/
