@@ -1,3 +1,4 @@
+pub mod display;
 pub mod prompt;
 
 use crate::config::{PermissionMode, ToolRiskLevel};
@@ -400,9 +401,8 @@ impl Agent {
 
             for tool_call in &tool_calls {
                 eprintln!(
-                    "  {} {}",
-                    format!("[tool: {}]", tool_call.name).cyan(),
-                    tool_call.arguments.to_string().dimmed()
+                    "  {}",
+                    display::format_tool_call_compact(&tool_call.name, &tool_call.arguments).cyan()
                 );
 
                 // Track read_file calls and enforce read-before-edit
