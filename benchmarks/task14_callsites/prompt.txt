@@ -1,0 +1,14 @@
+This codebase has a function `process_event` defined in `eventbus.py`. Find every place in the workspace that ACTUALLY CALLS this function (i.e. an expression `process_event(...)` that invokes it).
+
+Do NOT count any of these as a call:
+- The definition itself (`def process_event` in eventbus.py).
+- `import` statements.
+- Mentions inside docstrings or comments.
+- Mentions inside string literals.
+
+Write your answer to a file named `CALLSITES.md` in the workspace root. List one call per line in the form `path:line` — relative path from the workspace root, colon, line number. For example:
+
+    handlers/login.py:6
+    workers/email_worker.py:6
+
+The order doesn't matter. Do not modify any source file — only create CALLSITES.md.
