@@ -839,7 +839,7 @@ fn handle_slash_command(
             SlashResult::Handled
         }
         "/doctor" => {
-            run_doctor_command(cfg);
+            run_doctor_command(cfg, current_model);
             SlashResult::Handled
         }
         "/clear" => {
@@ -862,7 +862,7 @@ fn handle_slash_command(
     }
 }
 
-fn run_doctor_command(cfg: &Config) {
+fn run_doctor_command(cfg: &Config, active_model: &str) {
     use agent::doctor::{format_row, overall_exit_code, run_all, DiagnosticStatus};
 
     // Production HTTP getter — short timeout because /doctor should fail fast.
@@ -881,7 +881,7 @@ fn run_doctor_command(cfg: &Config) {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
 
     println!("{}", "Whet diagnostics:".bold());
-    let rows = run_all(cfg, &home, fetch);
+    let rows = run_all(cfg, active_model, &home, fetch);
     for row in &rows {
         let line = format_row(row);
         let coloured = match row.status {

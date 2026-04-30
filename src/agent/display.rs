@@ -580,6 +580,33 @@ mod tests {
         assert_eq!(out, "- 日本語\n+ 中文\n");
     }
 
+    #[test]
+    fn edit_diff_max_lines_zero_does_not_panic() {
+        // Pathological budget — all content gets bumped to truncation
+        // markers. Must not panic and must produce both markers when
+        // both sides have content.
+        let out = format_edit_diff("a\nb", "c\nd", 0);
+        assert!(out.contains("more removed line(s)"));
+        assert!(out.contains("more added line(s)"));
+    }
+
+    #[test]
+    fn edit_diff_max_lines_one_keeps_a_single_side_visible() {
+        // half = 0, so neither side qualifies as "short" via half-test.
+        // Falls through to (half=0, max-half=1) → 0 old, 1 new.
+        let out = format_edit_diff("a\nb", "c\nd", 1);
+        assert!(out.contains("+ c\n"));
+        assert!(out.contains("more removed line(s)"));
+        assert!(out.contains("more added line(s)"));
+    }
+
+    #[test]
+    fn edit_diff_identical_old_and_new_still_renders_both_sides() {
+        // No LCS: the helper is honest about being a remove-then-add view.
+        let out = format_edit_diff("same", "same", DIFF_PREVIEW_MAX_LINES);
+        assert_eq!(out, "- same\n+ same\n");
+    }
+
     // --- format_unified_diff_excerpt ---
 
     #[test]

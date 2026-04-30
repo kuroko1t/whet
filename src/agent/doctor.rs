@@ -74,14 +74,11 @@ pub fn overall_exit_code(rows: &[Diagnostic]) -> i32 {
 
 // --- Individual checks ---
 
-/// Verify ollama answers `/api/tags`. The `fetch` closure is the IO
-/// dependency so tests can mock the response.
-pub fn check_ollama_reachable<F>(base_url: &str, fetch: F) -> Diagnostic
-where
-    F: FnOnce(&str) -> Result<String, String>,
-{
-    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    match fetch(&url) {
+/// Pure classifier for an `/api/tags` response. The caller fetches the
+/// URL (so `run_all` can reuse the body for the model-present check
+/// without a second HTTP round-trip) and hands the result here.
+pub fn classify_ollama_response(base_url: &str, response: Result<String, String>) -> Diagnostic {
+    match response {
         Ok(body) if body.contains("\"models\"") => {
             Diagnostic::pass("ollama reachable", format!("{} responded", base_url))
         }
@@ -208,7 +205,12 @@ pub fn check_mcp_binaries(servers: &[McpServerConfig], which: impl Fn(&str) -> b
 /// Run all checks against a real environment. The `fetch` argument
 /// allows tests to inject a mock HTTP getter; production callers pass a
 /// reqwest-backed implementation.
-pub fn run_all<F>(cfg: &Config, home: &Path, fetch: F) -> Vec<Diagnostic>
+///
+/// `active_model` is the model the user actually invoked (`-m` flag or
+/// `/model` slash override). It can differ from `cfg.llm.model` (the
+/// config-file default), and `/doctor` should reflect the live state, so
+/// we check the active model rather than the static config.
+pub fn run_all<F>(cfg: &Config, active_model: &str, home: &Path, fetch: F) -> Vec<Diagnostic>
 where
     F: Fn(&str) -> Result<String, String>,
 {
@@ -217,9 +219,13 @@ where
     // Ollama-specific checks only run if provider is ollama.
     let is_ollama = cfg.llm.provider == "ollama";
     let ollama_body = if is_ollama {
+        // Fetch /api/tags ONCE and reuse for both the reachable check and
+        // the model-present check. Avoids a second 5-second timeout when
+        // ollama is unreachable.
         let url = format!("{}/api/tags", cfg.llm.base_url.trim_end_matches('/'));
-        let body = fetch(&url).ok();
-        rows.push(check_ollama_reachable(&cfg.llm.base_url, |u| fetch(u)));
+        let response = fetch(&url);
+        let body = response.as_ref().ok().cloned();
+        rows.push(classify_ollama_response(&cfg.llm.base_url, response));
         body
     } else {
         rows.push(Diagnostic::pass(
@@ -231,7 +237,7 @@ where
 
     if is_ollama {
         if let Some(body) = ollama_body {
-            rows.push(check_model_present(&cfg.llm.model, &body));
+            rows.push(check_model_present(active_model, &body));
         } else {
             rows.push(Diagnostic::fail(
                 "model available",
@@ -298,28 +304,7 @@ mod tests {
         }
     }
 
-    // --- check_ollama_reachable ---
-
-    #[test]
-    fn ollama_reachable_pass_on_models_key() {
-        let d = check_ollama_reachable("http://x", |_url| {
-            Ok(r#"{"models":[{"name":"qwen3.5:9b"}]}"#.to_string())
-        });
-        assert_eq!(d.status, DiagnosticStatus::Pass);
-    }
-
-    #[test]
-    fn ollama_reachable_warn_on_unexpected_body() {
-        let d = check_ollama_reachable("http://x", |_url| Ok("hello world".to_string()));
-        assert_eq!(d.status, DiagnosticStatus::Warn);
-    }
-
-    #[test]
-    fn ollama_reachable_fail_on_network_error() {
-        let d = check_ollama_reachable("http://x", |_url| Err("connection refused".to_string()));
-        assert_eq!(d.status, DiagnosticStatus::Fail);
-        assert!(d.detail.contains("connection refused"));
-    }
+    // (classify_ollama_response is covered by classify_ollama_response_pass_warn_fail below.)
 
     // --- check_model_present ---
 
@@ -481,18 +466,15 @@ database_path = "test.db"
     fn run_all_succeeds_with_mocked_ollama_and_tempdir() {
         let dir = tempfile::TempDir::new().unwrap();
         let cfg = fake_cfg();
-        let rows = run_all(&cfg, dir.path(), |_url| {
+        let rows = run_all(&cfg, "qwen3.5:9b", dir.path(), |_url| {
             Ok(r#"{"models":[{"name":"qwen3.5:9b"}]}"#.to_string())
         });
-        // ollama reachable + model available + config parses (warn, no file)
-        // + ~/.whet writable + MCP servers (pass, none).
         let names: Vec<&str> = rows.iter().map(|d| d.name).collect();
         assert!(names.contains(&"ollama reachable"));
         assert!(names.contains(&"model available"));
         assert!(names.contains(&"config parses"));
         assert!(names.contains(&"~/.whet writable"));
         assert!(names.contains(&"MCP servers"));
-        // No Fail entries.
         assert_eq!(overall_exit_code(&rows), 0);
     }
 
@@ -500,12 +482,62 @@ database_path = "test.db"
     fn run_all_marks_ollama_unreachable_as_fail_and_chains_model_check() {
         let dir = tempfile::TempDir::new().unwrap();
         let cfg = fake_cfg();
-        let rows = run_all(&cfg, dir.path(), |_url| Err("connect refused".to_string()));
+        let rows = run_all(&cfg, "qwen3.5:9b", dir.path(), |_url| {
+            Err("connect refused".to_string())
+        });
         let ollama_row = rows.iter().find(|d| d.name == "ollama reachable").unwrap();
         let model_row = rows.iter().find(|d| d.name == "model available").unwrap();
         assert_eq!(ollama_row.status, DiagnosticStatus::Fail);
         assert_eq!(model_row.status, DiagnosticStatus::Fail);
         assert!(model_row.detail.contains("ollama unreachable"));
         assert_eq!(overall_exit_code(&rows), 1);
+    }
+
+    #[test]
+    fn run_all_checks_active_model_not_config_default() {
+        // The user invoked `whet -m runtime-model`, but the config default is
+        // `config-model`. /doctor must check the runtime model, not the config
+        // (otherwise it gives bogus PASS when the user typo'd -m).
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut cfg = fake_cfg();
+        cfg.llm.model = "config-model".to_string();
+        let rows = run_all(&cfg, "runtime-model", dir.path(), |_url| {
+            // ollama has runtime-model but NOT config-model
+            Ok(r#"{"models":[{"name":"runtime-model:latest"}]}"#.to_string())
+        });
+        let model_row = rows.iter().find(|d| d.name == "model available").unwrap();
+        assert_eq!(model_row.status, DiagnosticStatus::Pass);
+        assert!(
+            model_row.detail.contains("runtime-model"),
+            "model row should refer to the runtime model: {:?}",
+            model_row.detail
+        );
+    }
+
+    #[test]
+    fn run_all_fetches_ollama_tags_only_once() {
+        // Regression guard: previously /doctor double-fetched /api/tags
+        // (once for reachable, once for body), causing a 10s hang on
+        // unreachable ollama. The aggregator must call fetch exactly once.
+        use std::cell::Cell;
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = fake_cfg();
+        let calls = Cell::new(0u32);
+        let _rows = run_all(&cfg, "qwen3.5:9b", dir.path(), |_url| {
+            calls.set(calls.get() + 1);
+            Ok(r#"{"models":[{"name":"qwen3.5:9b"}]}"#.to_string())
+        });
+        assert_eq!(calls.get(), 1, "expected exactly one /api/tags fetch");
+    }
+
+    #[test]
+    fn classify_ollama_response_pass_warn_fail() {
+        let pass =
+            classify_ollama_response("http://x", Ok(r#"{"models":[{"name":"a"}]}"#.to_string()));
+        assert_eq!(pass.status, DiagnosticStatus::Pass);
+        let warn = classify_ollama_response("http://x", Ok("{}".to_string()));
+        assert_eq!(warn.status, DiagnosticStatus::Warn);
+        let fail = classify_ollama_response("http://x", Err("nope".to_string()));
+        assert_eq!(fail.status, DiagnosticStatus::Fail);
     }
 }
