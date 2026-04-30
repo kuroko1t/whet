@@ -1,3 +1,5 @@
+pub mod display;
+pub mod doctor;
 pub mod prompt;
 
 use crate::config::{PermissionMode, ToolRiskLevel};
@@ -400,9 +402,8 @@ impl Agent {
 
             for tool_call in &tool_calls {
                 eprintln!(
-                    "  {} {}",
-                    format!("[tool: {}]", tool_call.name).cyan(),
-                    tool_call.arguments.to_string().dimmed()
+                    "  {}",
+                    display::format_tool_call_compact(&tool_call.name, &tool_call.arguments).cyan()
                 );
 
                 // Track read_file calls and enforce read-before-edit
@@ -468,6 +469,25 @@ impl Agent {
                         has_read = true;
                     } else {
                         has_acted = true;
+                    }
+                    // UX.9: show what actually changed for edit_file / apply_diff.
+                    match tool_call.name.as_str() {
+                        "edit_file" => {
+                            let preview = display::format_edit_diff(
+                                tool_call.arguments["old_text"].as_str().unwrap_or(""),
+                                tool_call.arguments["new_text"].as_str().unwrap_or(""),
+                                display::DIFF_PREVIEW_MAX_LINES,
+                            );
+                            display::print_colored_diff(&preview);
+                        }
+                        "apply_diff" => {
+                            let preview = display::format_unified_diff_excerpt(
+                                tool_call.arguments["diff"].as_str().unwrap_or(""),
+                                display::DIFF_PREVIEW_MAX_LINES,
+                            );
+                            display::print_colored_diff(&preview);
+                        }
+                        _ => {}
                     }
                 }
                 write_stats_event(
