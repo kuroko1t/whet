@@ -815,6 +815,10 @@ fn handle_slash_command(
                 "  {} [cmd]   - Run test-fix loop (default: cargo test)",
                 "/test".cyan()
             );
+            println!(
+                "  {}         - Run diagnostics (ollama, model, config, MCP, dirs)",
+                "/doctor".cyan()
+            );
             println!("  {}           - Generate WHET.md template", "/init".cyan());
             println!(
                 "  {} [msg] - Compress conversation context",
@@ -834,6 +838,10 @@ fn handle_slash_command(
             run_test_fix_loop(agent, test_cmd, cfg);
             SlashResult::Handled
         }
+        "/doctor" => {
+            run_doctor_command(cfg);
+            SlashResult::Handled
+        }
         "/clear" => {
             agent.memory.clear();
             agent
@@ -851,6 +859,43 @@ fn handle_slash_command(
             );
             SlashResult::Handled
         }
+    }
+}
+
+fn run_doctor_command(cfg: &Config) {
+    use agent::doctor::{format_row, overall_exit_code, run_all, DiagnosticStatus};
+
+    // Production HTTP getter — short timeout because /doctor should fail fast.
+    let fetch = |url: &str| -> Result<String, String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client.get(url).send().map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        resp.text().map_err(|e| e.to_string())
+    };
+
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+
+    println!("{}", "Whet diagnostics:".bold());
+    let rows = run_all(cfg, &home, fetch);
+    for row in &rows {
+        let line = format_row(row);
+        let coloured = match row.status {
+            DiagnosticStatus::Pass => line.green().to_string(),
+            DiagnosticStatus::Warn => line.yellow().to_string(),
+            DiagnosticStatus::Fail => line.red().to_string(),
+        };
+        println!("  {}", coloured);
+    }
+    let code = overall_exit_code(&rows);
+    if code == 0 {
+        println!("{}", "Overall: PASS".green().bold());
+    } else {
+        println!("{}", "Overall: FAIL".red().bold());
     }
 }
 

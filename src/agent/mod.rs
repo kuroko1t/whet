@@ -1,4 +1,5 @@
 pub mod display;
+pub mod doctor;
 pub mod prompt;
 
 use crate::config::{PermissionMode, ToolRiskLevel};
