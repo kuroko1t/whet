@@ -820,8 +820,12 @@ fn handle_slash_command(
                 "/doctor".cyan()
             );
             println!(
-                "  {} <task>  - Run a focused subagent on <task> (isolated context)",
+                "  {} <task>  - Run a focused subagent on <task> (isolated context).",
                 "/agent".cyan()
+            );
+            println!(
+                "             {}",
+                "The agent itself can also call subagent autonomously.".dimmed()
             );
             println!("  {}           - Generate WHET.md template", "/init".cyan());
             println!(
