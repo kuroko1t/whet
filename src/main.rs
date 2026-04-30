@@ -819,6 +819,10 @@ fn handle_slash_command(
                 "  {}         - Run diagnostics (ollama, model, config, MCP, dirs)",
                 "/doctor".cyan()
             );
+            println!(
+                "  {} <task>  - Run a focused subagent on <task> (isolated context)",
+                "/agent".cyan()
+            );
             println!("  {}           - Generate WHET.md template", "/init".cyan());
             println!(
                 "  {} [msg] - Compress conversation context",
@@ -840,6 +844,14 @@ fn handle_slash_command(
         }
         "/doctor" => {
             run_doctor_command(cfg, current_model);
+            SlashResult::Handled
+        }
+        "/agent" => {
+            if arg.is_empty() {
+                eprintln!("{} usage: /agent <task>", "Error:".red());
+                return SlashResult::Handled;
+            }
+            run_agent_subtask(agent, arg, cfg);
             SlashResult::Handled
         }
         "/clear" => {
@@ -896,6 +908,51 @@ fn run_doctor_command(cfg: &Config, active_model: &str) {
         println!("{}", "Overall: PASS".green().bold());
     } else {
         println!("{}", "Overall: FAIL".red().bold());
+    }
+}
+
+/// Dispatch a `/agent <task>` slash invocation. Spawns a subagent with
+/// isolated memory + read-paths, prints the result inline, and returns
+/// to the parent REPL with parent state untouched.
+///
+/// In this Phase A, the subagent uses the same model/tools/config as the
+/// parent and runs sequentially. Permission policy is the parent's
+/// (yolo / accept_edits / default).
+fn run_agent_subtask(agent: &mut Agent, task: &str, cfg: &Config) {
+    println!("{} {}", "Subagent:".cyan().bold(), task.dimmed());
+
+    let yolo = matches!(cfg.agent.permission_mode, config::PermissionMode::Yolo);
+    let streaming = cfg.llm.streaming;
+
+    let result = if streaming {
+        let mut spinner = Some(agent::display::Spinner::start());
+        let r = agent.run_subagent(
+            task,
+            &mut |token| {
+                if let Some(mut s) = spinner.take() {
+                    s.stop();
+                }
+                eprint!("{}", token);
+            },
+            &mut |_, _| yolo,
+        );
+        if let Some(mut s) = spinner.take() {
+            s.stop();
+        }
+        eprintln!();
+        r
+    } else {
+        agent.run_subagent(task, &mut |_| {}, &mut |_, _| yolo)
+    };
+
+    match result {
+        Ok(text) => {
+            println!("{}", "Subagent result:".cyan().bold());
+            println!("{}", text);
+        }
+        Err(e) => {
+            eprintln!("{} subagent failed: {}", "Error:".red(), e);
+        }
     }
 }
 
