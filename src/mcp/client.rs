@@ -348,11 +348,23 @@ for line in sys.stdin:
     }
 
     fn create_mock_mcp_server() -> Result<McpClient, McpError> {
+        // Cargo runs the lib-test and bin-test binaries in parallel. With a
+        // hardcoded path both binaries write to (and spawn against) the same
+        // file, racing on subprocess teardown — the test fails with
+        // "Server closed connection" intermittently. Make each invocation use
+        // its own script path so the binaries cannot collide.
+        use std::time::{SystemTime, UNIX_EPOCH};
         let script = mock_mcp_script();
-        let script_path = "/tmp/whet_mock_mcp.py";
-        std::fs::write(script_path, &script)
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let script_path =
+            std::env::temp_dir().join(format!("whet_mock_mcp_{}_{}.py", std::process::id(), nanos));
+        let script_path_str = script_path.to_string_lossy().to_string();
+        std::fs::write(&script_path, &script)
             .map_err(|e| McpError::SpawnFailed(format!("Failed to write mock script: {}", e)))?;
-        McpClient::new("mock_server", "python3", &[script_path.to_string()])
+        McpClient::new("mock_server", "python3", &[script_path_str])
     }
 
     #[test]

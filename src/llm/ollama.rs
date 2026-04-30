@@ -91,7 +91,16 @@ impl OllamaClient {
         Self::with_options(base_url, model, LlmOptions::default())
     }
 
-    pub fn with_options(base_url: &str, model: &str, options: LlmOptions) -> Self {
+    pub fn with_options(base_url: &str, model: &str, mut options: LlmOptions) -> Self {
+        // Bound runaway generation. Without this, a single LLM call can stream
+        // tokens for >10 minutes (observed during eval-loop on a 9B model on
+        // task8_cli_filter run 2). Override by setting [llm.options].num_predict
+        // explicitly in ~/.whet/config.toml (use -1 for ollama-default unlimited).
+        const DEFAULT_NUM_PREDICT: i32 = 8192;
+        if options.num_predict.is_none() {
+            options.num_predict = Some(DEFAULT_NUM_PREDICT);
+        }
+
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
@@ -679,6 +688,39 @@ mod tests {
         let client = OllamaClient::new("http://localhost:11434", "test-model");
         assert_eq!(client.base_url, "http://localhost:11434");
         assert_eq!(client.model, "test-model");
+    }
+
+    #[test]
+    fn test_default_num_predict_caps_runaway_generation() {
+        // with_options must apply a finite num_predict default when the caller
+        // didn't specify one, to bound runaway responses (fixes Phase 1.6).
+        let client = OllamaClient::with_options(
+            "http://localhost:11434",
+            "test-model",
+            LlmOptions::default(),
+        );
+        assert_eq!(
+            client.options.num_predict,
+            Some(8192),
+            "default num_predict cap must be applied when caller passes None"
+        );
+    }
+
+    #[test]
+    fn test_explicit_num_predict_is_preserved() {
+        // Users who set num_predict explicitly (including -1 for unlimited)
+        // must see their value preserved — the default only fills in None.
+        for explicit in [-1, 1024, 32768] {
+            let client = OllamaClient::with_options(
+                "http://localhost:11434",
+                "test-model",
+                LlmOptions {
+                    num_predict: Some(explicit),
+                    ..LlmOptions::default()
+                },
+            );
+            assert_eq!(client.options.num_predict, Some(explicit));
+        }
     }
 
     // --- Streaming response chunk parsing tests ---
