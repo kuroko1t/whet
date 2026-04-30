@@ -97,20 +97,28 @@ pub struct Agent {
 /// needs deeper delegation.
 pub const MAX_SUBAGENT_DEPTH: usize = 1;
 
-/// Sentinels that `process_message_with_callbacks` returns on internal
-/// failure paths. Used by the subagent dispatch to map a child loop's
-/// final string back to a success/failure flag for parent stats and
-/// model context. Heuristic — assumes well-behaved models don't start
-/// real responses with these specific phrases.
-const CHILD_ERROR_SENTINELS: &[&str] = &[
-    "Error:",                  // LLM provider error (e.g. connection refused)
-    "Max iterations reached.", // hit base+extension cap without final answer
-];
+/// How an agent loop iteration concluded. Surfaced from
+/// `process_message_full` and consumed by `run_subagent` so the parent
+/// can correctly classify a subagent's outcome (success vs. LLM-side
+/// failure vs. iteration-cap exhaustion) without resorting to fragile
+/// string-prefix heuristics on the returned text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExitReason {
+    /// The agent emitted a final assistant message (no further tool calls).
+    Answered,
+    /// LLM provider returned an error mid-loop.
+    LlmError(String),
+    /// Hit the adaptive iteration cap without a final answer.
+    MaxIterations,
+}
 
-fn is_child_error_sentinel(text: &str) -> bool {
-    CHILD_ERROR_SENTINELS
-        .iter()
-        .any(|prefix| text.starts_with(prefix))
+impl ExitReason {
+    /// True when the loop completed with a real answer; false for any
+    /// internal failure path. Used by the parent loop to set
+    /// `tool_success` on a subagent dispatch.
+    pub fn is_success(&self) -> bool {
+        matches!(self, ExitReason::Answered)
+    }
 }
 
 /// RAII guard that swaps the parent's per-conversation state out for a
@@ -350,6 +358,24 @@ impl Agent {
         on_token: &mut dyn FnMut(&str),
         on_approve: &mut dyn FnMut(&str, &serde_json::Value) -> bool,
     ) -> String {
+        // Public surface keeps returning a plain String for the 19-odd
+        // callers (single-shot, REPL, /test loop, tests). The full
+        // (text, ExitReason) tuple is exposed via process_message_full
+        // for run_subagent's structural success/failure classification.
+        self.process_message_full(user_input, on_token, on_approve)
+            .0
+    }
+
+    /// Same as `process_message_with_callbacks` but also returns the
+    /// `ExitReason` describing how the loop concluded. Reserved for
+    /// callers that need to distinguish a real answer from an LLM
+    /// error or an iteration-cap miss without scraping the result text.
+    pub fn process_message_full(
+        &mut self,
+        user_input: &str,
+        on_token: &mut dyn FnMut(&str),
+        on_approve: &mut dyn FnMut(&str, &serde_json::Value) -> bool,
+    ) -> (String, ExitReason) {
         self.memory.push(Message::user(user_input));
 
         // Compress context if enabled and threshold exceeded
@@ -412,7 +438,8 @@ impl Agent {
                         "llm_error",
                         self.subagent_depth,
                     );
-                    return format!("Error: {}", e);
+                    let msg = format!("Error: {}", e);
+                    return (msg, ExitReason::LlmError(e.to_string()));
                 }
             };
 
@@ -492,7 +519,7 @@ impl Agent {
                     "answered",
                     self.subagent_depth,
                 );
-                return content;
+                return (content, ExitReason::Answered);
             }
 
             // Separate content from tool calls to avoid borrow issues
@@ -553,15 +580,11 @@ impl Agent {
                                 format!("Task: {}\n\nContext:\n{}", task, context)
                             };
                             match self.run_subagent(&brief, on_token, on_approve) {
-                                Ok(text) => {
-                                    // Detect known child-loop error sentinels so
-                                    // parent stats and the model's view of the
-                                    // result both reflect failure. Without this,
-                                    // a connection error or hit-max-iter from the
-                                    // child would be recorded as success.
-                                    let success = !is_child_error_sentinel(&text);
-                                    (text, success)
-                                }
+                                // Structural classification via ExitReason —
+                                // an LlmError or MaxIterations marks the call
+                                // as failed for parent stats and the parent
+                                // model's view, no string-prefix heuristic.
+                                Ok((text, reason)) => (text, reason.is_success()),
                                 Err(e) => (format!("Tool error: {}", e), false),
                             }
                         }
@@ -663,7 +686,10 @@ impl Agent {
             "max_iterations",
             self.subagent_depth,
         );
-        "Max iterations reached. The agent could not complete the task.".to_string()
+        (
+            "Max iterations reached. The agent could not complete the task.".to_string(),
+            ExitReason::MaxIterations,
+        )
     }
 
     /// Add a path to the set of files that have been read (for read-before-edit tracking).
@@ -691,7 +717,7 @@ impl Agent {
         brief: &str,
         on_token: &mut dyn FnMut(&str),
         on_approve: &mut dyn FnMut(&str, &serde_json::Value) -> bool,
-    ) -> Result<String, String> {
+    ) -> Result<(String, ExitReason), String> {
         if self.subagent_depth >= MAX_SUBAGENT_DEPTH {
             return Err(format!(
                 "subagent nesting beyond depth {} is not supported",
@@ -713,7 +739,7 @@ impl Agent {
         let _guard = SubagentGuard::enter(self, system_msg);
         let result = _guard
             .agent
-            .process_message_with_callbacks(brief, on_token, on_approve);
+            .process_message_full(brief, on_token, on_approve);
         // _guard is dropped here, restoring parent state.
 
         Ok(result)
@@ -2803,10 +2829,11 @@ mod tests {
             usage: TokenUsage::default(),
         }]);
         let mut agent = make_agent(Box::new(llm));
-        let result = agent
+        let (text, reason) = agent
             .run_subagent("investigate X", &mut |_| {}, &mut |_, _| true)
             .expect("subagent should run");
-        assert_eq!(result, "subagent finished");
+        assert_eq!(text, "subagent finished");
+        assert_eq!(reason, ExitReason::Answered);
     }
 
     #[test]
@@ -3032,6 +3059,234 @@ mod tests {
                 names
             );
         }
+    }
+
+    #[test]
+    fn test_run_subagent_returns_exit_reason_max_iterations_directly() {
+        // Direct check: run_subagent's structural ExitReason should be
+        // MaxIterations when the child hits the cap. Parent dispatch
+        // tests (below) verify the success/failure mapping; this test
+        // is the unit that pins the mapping itself.
+        let llm = MockLlm::new(vec![
+            // 8 turns of "list_dir" so the child keeps making progress
+            // (advancing last_progress_iter) and exhausts both base and
+            // extension caps.
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c2".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c3".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c4".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c5".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c6".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c7".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c8".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig {
+                max_iterations: 2,
+                ..AgentConfig::default()
+            },
+            &[],
+        );
+        let (text, reason) = agent
+            .run_subagent("spin", &mut |_| {}, &mut |_, _| true)
+            .expect("subagent should at least start");
+        assert_eq!(reason, ExitReason::MaxIterations);
+        assert!(!reason.is_success());
+        assert!(text.starts_with("Max iterations reached"));
+    }
+
+    #[test]
+    fn test_subagent_does_not_double_emit_session_end_in_stats_jsonl() {
+        // Hardening fix #5: emit_session_end_at_depth() short-circuits
+        // when subagent_depth > 0, so the child's loop completion does
+        // not write a second `session_end` line into stats.jsonl. The
+        // parent's normal session_end is still emitted exactly once.
+        let dir = tempfile::TempDir::new().unwrap();
+        let jsonl_path = dir.path().join("stats.jsonl");
+
+        let llm = MockLlm::new(vec![
+            // Parent: emit a subagent call.
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "p1".to_string(),
+                    name: "subagent".to_string(),
+                    arguments: serde_json::json!({"task": "investigate"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Child: returns immediately with a final answer.
+            LlmResponse {
+                content: Some("subagent done".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // Parent: final answer after seeing subagent's result.
+            LlmResponse {
+                content: Some("parent done".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent_with_jsonl(Box::new(llm), jsonl_path.clone());
+        let _ = agent.process_message_with_callbacks("hi", &mut |_| {}, &mut |_, _| true);
+
+        let contents = std::fs::read_to_string(&jsonl_path).expect("stats jsonl written");
+        let session_end_count = contents
+            .lines()
+            .filter(|line| line.contains("\"event\":\"session_end\""))
+            .count();
+        assert_eq!(
+            session_end_count, 1,
+            "expected exactly 1 session_end event, got {}\n--- stats.jsonl ---\n{}",
+            session_end_count, contents
+        );
+    }
+
+    #[test]
+    fn test_subagent_guard_restores_parent_state_on_child_panic() {
+        // The RAII SubagentGuard must restore parent state even when
+        // the child loop panics. We exercise this by giving the child
+        // an LlmProvider that panics during chat(), then catching the
+        // panic with std::panic::catch_unwind. After unwind:
+        //   * memory length == before-call length (child swap reverted)
+        //   * memory[0] == parent's original system prompt
+        //   * read_paths == before-call set
+        //   * subagent_depth == 0
+        struct PanickingLlm;
+        impl LlmProvider for PanickingLlm {
+            fn chat(&self, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse, LlmError> {
+                panic!("simulated child-loop panic");
+            }
+        }
+
+        let mut agent = Agent::new(
+            Box::new(PanickingLlm),
+            default_registry(),
+            AgentConfig::default(),
+            &[],
+        );
+        // Pre-seed parent state so we have something concrete to verify
+        // gets restored.
+        agent.memory.push(Message::user("parent question"));
+        agent.memory.push(Message::assistant("parent answer"));
+        agent.add_read_path("src/parent.rs");
+
+        let parent_memory_len = agent.memory.len();
+        let parent_system_content = agent.memory[0].content.clone();
+        let parent_paths = agent.read_paths.clone();
+        assert_eq!(agent.subagent_depth, 0);
+
+        // catch_unwind needs UnwindSafe; &mut Agent isn't, but the whole
+        // point of this test is to assert state is consistent across the
+        // unwind, so AssertUnwindSafe is appropriate.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            agent.run_subagent("subagent task", &mut |_| {}, &mut |_, _| true)
+        }));
+
+        assert!(
+            result.is_err(),
+            "PanickingLlm should propagate the panic out of run_subagent"
+        );
+
+        // Parent state fully restored after unwind.
+        assert_eq!(
+            agent.memory.len(),
+            parent_memory_len,
+            "memory length not restored after panic"
+        );
+        assert_eq!(
+            agent.memory[0].content, parent_system_content,
+            "parent system prompt not restored"
+        );
+        assert_eq!(
+            agent.read_paths, parent_paths,
+            "read_paths not restored after panic"
+        );
+        assert_eq!(
+            agent.subagent_depth, 0,
+            "subagent_depth not decremented on panic"
+        );
+    }
+
+    #[test]
+    fn test_run_subagent_returns_exit_reason_llm_error_directly() {
+        // ErrorLlm always returns a connection error; the child loop
+        // surfaces it as ExitReason::LlmError(...). Parent must see
+        // the tuple's reason as a failure (is_success() == false).
+        let mut agent = make_agent(Box::new(ErrorLlm));
+        let (text, reason) = agent
+            .run_subagent("anything", &mut |_| {}, &mut |_, _| true)
+            .expect("subagent should at least construct");
+        assert!(matches!(reason, ExitReason::LlmError(_)));
+        assert!(!reason.is_success());
+        assert!(text.starts_with("Error:"));
     }
 
     #[test]

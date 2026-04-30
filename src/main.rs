@@ -950,8 +950,13 @@ fn run_agent_subtask(agent: &mut Agent, task: &str, cfg: &Config) {
     };
 
     match result {
-        Ok(text) => {
-            println!("{}", "Subagent result:".cyan().bold());
+        Ok((text, reason)) => {
+            let header = if reason.is_success() {
+                "Subagent result:".cyan().bold()
+            } else {
+                "Subagent stopped early:".yellow().bold()
+            };
+            println!("{}", header);
             println!("{}", text);
         }
         Err(e) => {
