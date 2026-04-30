@@ -470,6 +470,25 @@ impl Agent {
                     } else {
                         has_acted = true;
                     }
+                    // UX.9: show what actually changed for edit_file / apply_diff.
+                    match tool_call.name.as_str() {
+                        "edit_file" => {
+                            let preview = display::format_edit_diff(
+                                tool_call.arguments["old_text"].as_str().unwrap_or(""),
+                                tool_call.arguments["new_text"].as_str().unwrap_or(""),
+                                display::DIFF_PREVIEW_MAX_LINES,
+                            );
+                            display::print_colored_diff(&preview);
+                        }
+                        "apply_diff" => {
+                            let preview = display::format_unified_diff_excerpt(
+                                tool_call.arguments["diff"].as_str().unwrap_or(""),
+                                display::DIFF_PREVIEW_MAX_LINES,
+                            );
+                            display::print_colored_diff(&preview);
+                        }
+                        _ => {}
+                    }
                 }
                 write_stats_event(
                     &self.config.stats_jsonl_path,

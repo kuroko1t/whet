@@ -164,6 +164,127 @@ impl Drop for Spinner {
     }
 }
 
+/// Maximum number of preview lines we'll print after a successful edit.
+/// Picked so a sizeable refactor still fits on screen without scrolling
+/// past the next prompt.
+pub const DIFF_PREVIEW_MAX_LINES: usize = 24;
+
+/// Render a before/after edit as a plain-text unified-style preview. UX.9.
+///
+/// All `old_text` lines are emitted with `- ` prefix; all `new_text`
+/// lines with `+ `. We don't compute LCS — `edit_file` replacements are
+/// usually small focused snippets, and a naive remove-then-add is the
+/// honest representation of what `edit_file` actually does.
+///
+/// Output is plain text (no ANSI). The caller (`print_colored_diff`)
+/// applies colour at print time so this helper stays unit-testable.
+///
+/// If the rendered output would exceed `max_lines`, we truncate the
+/// older half and the newer half separately so both sides remain
+/// visible, with `… N more {removed,added} lines` markers.
+pub fn format_edit_diff(old_text: &str, new_text: &str, max_lines: usize) -> String {
+    let old_lines: Vec<&str> = if old_text.is_empty() {
+        Vec::new()
+    } else {
+        old_text.split('\n').collect()
+    };
+    let new_lines: Vec<&str> = if new_text.is_empty() {
+        Vec::new()
+    } else {
+        new_text.split('\n').collect()
+    };
+
+    // Reserve up to half the budget per side; if one side is short,
+    // the other gets the slack. Asymmetric edits stay visible.
+    let half = max_lines / 2;
+    let new_short = new_lines.len() <= half;
+    let old_short = old_lines.len() <= half;
+    let (take_old, take_new) = if old_short && new_short {
+        (old_lines.len(), new_lines.len())
+    } else if old_short {
+        (
+            old_lines.len(),
+            new_lines.len().min(max_lines - old_lines.len()),
+        )
+    } else if new_short {
+        (
+            old_lines.len().min(max_lines - new_lines.len()),
+            new_lines.len(),
+        )
+    } else {
+        (half, max_lines - half)
+    };
+
+    let mut out = String::new();
+    for line in old_lines.iter().take(take_old) {
+        out.push_str("- ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    if old_lines.len() > take_old {
+        out.push_str(&format!(
+            "- … {} more removed line(s)\n",
+            old_lines.len() - take_old
+        ));
+    }
+    for line in new_lines.iter().take(take_new) {
+        out.push_str("+ ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    if new_lines.len() > take_new {
+        out.push_str(&format!(
+            "+ … {} more added line(s)\n",
+            new_lines.len() - take_new
+        ));
+    }
+    out
+}
+
+/// Truncate a unified diff to `max_lines`, appending a `…` continuation
+/// marker if anything was cut. Pure helper; the caller colours.
+pub fn format_unified_diff_excerpt(diff: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = diff.split('\n').collect();
+    if lines.len() <= max_lines {
+        return diff.to_string();
+    }
+    let mut out = String::new();
+    for line in lines.iter().take(max_lines) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&format!(
+        "… {} more diff line(s)\n",
+        lines.len() - max_lines
+    ));
+    out
+}
+
+/// Print a diff preview to stderr with per-line ANSI colouring.
+/// Suppressed when stderr isn't a TTY so non-interactive runs stay clean.
+///
+/// Lines starting with `-` (and not `---`) are red; `+` (and not `+++`)
+/// are green; `@@…` hunk headers are cyan; everything else is dimmed.
+pub fn print_colored_diff(text: &str) {
+    use colored::Colorize;
+    if !io::stderr().is_terminal() {
+        return;
+    }
+    for line in text.lines() {
+        if line.starts_with("@@") {
+            eprintln!("  {}", line.cyan());
+        } else if line.starts_with("+++") || line.starts_with("---") {
+            eprintln!("  {}", line.dimmed());
+        } else if line.starts_with('+') {
+            eprintln!("  {}", line.green());
+        } else if line.starts_with('-') {
+            eprintln!("  {}", line.red());
+        } else {
+            eprintln!("  {}", line.dimmed());
+        }
+    }
+}
+
 /// Truncate `s` to at most `MAX_ARG_LEN` characters, appending `…` when
 /// truncation occurred. Char-boundary safe.
 fn truncate_arg(s: &str) -> String {
@@ -397,5 +518,89 @@ mod tests {
         let mut s = Spinner::start_with_tty(false);
         s.stop();
         s.stop();
+    }
+
+    // --- format_edit_diff ---
+
+    #[test]
+    fn edit_diff_simple_single_line() {
+        let out = format_edit_diff("old", "new", DIFF_PREVIEW_MAX_LINES);
+        assert_eq!(out, "- old\n+ new\n");
+    }
+
+    #[test]
+    fn edit_diff_multi_line_replacement() {
+        let out = format_edit_diff("a\nb", "x\ny\nz", DIFF_PREVIEW_MAX_LINES);
+        assert_eq!(out, "- a\n- b\n+ x\n+ y\n+ z\n");
+    }
+
+    #[test]
+    fn edit_diff_empty_old_means_pure_insertion() {
+        let out = format_edit_diff("", "new line", DIFF_PREVIEW_MAX_LINES);
+        assert_eq!(out, "+ new line\n");
+    }
+
+    #[test]
+    fn edit_diff_empty_new_means_pure_deletion() {
+        let out = format_edit_diff("gone", "", DIFF_PREVIEW_MAX_LINES);
+        assert_eq!(out, "- gone\n");
+    }
+
+    #[test]
+    fn edit_diff_truncates_each_side_when_huge() {
+        // 100 lines on each side, max 10 → 5 per side + truncation markers.
+        let big_old: String = (0..100).map(|i| format!("o{}\n", i)).collect();
+        let big_new: String = (0..100).map(|i| format!("n{}\n", i)).collect();
+        let out = format_edit_diff(big_old.trim_end(), big_new.trim_end(), 10);
+        assert_eq!(out.matches("more removed line(s)").count(), 1);
+        assert_eq!(out.matches("more added line(s)").count(), 1);
+        // 5 actual content lines per side (markers use `- … ` / `+ … `,
+        // not `- o` / `+ n`, so they don't inflate these counts).
+        assert_eq!(out.matches("- o").count(), 5);
+        assert_eq!(out.matches("+ n").count(), 5);
+    }
+
+    #[test]
+    fn edit_diff_donates_slack_when_one_side_short() {
+        // Old has 2 lines; new has 20. Budget 10. New gets 10 - 2 = 8.
+        let old = "a\nb";
+        let new: String = (0..20).map(|i| format!("n{}\n", i)).collect();
+        let out = format_edit_diff(old, new.trim_end(), 10);
+        assert!(out.contains("- a\n"));
+        assert!(out.contains("- b\n"));
+        assert_eq!(out.matches("+ n").count(), 8); // 8 added lines printed
+        assert!(out.contains("more added line(s)"));
+        assert!(!out.contains("more removed line(s)")); // old fully shown
+    }
+
+    #[test]
+    fn edit_diff_handles_unicode_safely() {
+        // Multi-byte chars must not panic during slicing.
+        let out = format_edit_diff("日本語", "中文", DIFF_PREVIEW_MAX_LINES);
+        assert_eq!(out, "- 日本語\n+ 中文\n");
+    }
+
+    // --- format_unified_diff_excerpt ---
+
+    #[test]
+    fn unified_diff_excerpt_passthrough_when_short() {
+        let diff = "@@ -1,1 +1,1 @@\n-old\n+new\n";
+        assert_eq!(format_unified_diff_excerpt(diff, 10), diff);
+    }
+
+    #[test]
+    fn unified_diff_excerpt_truncates_when_long() {
+        let lines: Vec<String> = (0..50).map(|i| format!("line{}", i)).collect();
+        let diff = lines.join("\n");
+        let out = format_unified_diff_excerpt(&diff, 5);
+        assert!(out.contains("line0\n"));
+        assert!(out.contains("line4\n"));
+        assert!(!out.contains("line5\n"));
+        assert!(out.contains("more diff line(s)"));
+    }
+
+    #[test]
+    fn unified_diff_excerpt_empty_input() {
+        assert_eq!(format_unified_diff_excerpt("", 10), "");
     }
 }
