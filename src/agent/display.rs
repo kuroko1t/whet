@@ -11,6 +11,11 @@
 //! unit-testable. The caller is responsible for ANSI colouring.
 
 use serde_json::Value;
+use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// Maximum characters of an inline argument shown before a `…` ellipsis.
 /// Picked so a typical shell command or path fits on one terminal line.
@@ -79,6 +84,83 @@ pub fn format_tool_call_compact(name: &str, args: &Value) -> String {
                 format!("{}({})", name, short)
             }
         }
+    }
+}
+
+/// Braille spinner frames cycled by `spinner_frame`. Picked because the
+/// glyphs are roughly the same width and rotate cleanly at small sizes.
+const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// One full rotation per ~800 ms (10 frames × 80 ms tick).
+const SPINNER_TICK_MS: u128 = 80;
+
+/// Pick the spinner frame for an elapsed-since-start duration. Pure,
+/// deterministic, unit-testable.
+pub fn spinner_frame(elapsed_ms: u128) -> char {
+    SPINNER_FRAMES[((elapsed_ms / SPINNER_TICK_MS) as usize) % SPINNER_FRAMES.len()]
+}
+
+/// Background spinner that prints a "thinking…" indicator on stderr while
+/// waiting for the model's first streamed token. UX.3.
+///
+/// Intended use: construct with `Spinner::start()`, then `stop()` (or drop)
+/// when the first token arrives or the call returns. Dropping clears the
+/// line and joins the thread.
+///
+/// Skips entirely (returns a no-op handle) when stderr is not a TTY, so
+/// non-interactive use (`whet -p ... 2>file`) stays clean.
+pub struct Spinner {
+    active: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Spinner {
+    /// Start the spinner. No-op when stderr isn't a terminal.
+    pub fn start() -> Self {
+        Self::start_with_tty(io::stderr().is_terminal())
+    }
+
+    /// Same as `start` but with an explicit TTY decision (testable).
+    fn start_with_tty(is_tty: bool) -> Self {
+        let active = Arc::new(AtomicBool::new(is_tty));
+        if !is_tty {
+            return Self {
+                active,
+                handle: None,
+            };
+        }
+        let active_clone = Arc::clone(&active);
+        let handle = thread::spawn(move || {
+            let start = Instant::now();
+            while active_clone.load(Ordering::Relaxed) {
+                let frame = spinner_frame(start.elapsed().as_millis());
+                eprint!("\r{} thinking…", frame);
+                let _ = io::stderr().flush();
+                thread::sleep(Duration::from_millis(SPINNER_TICK_MS as u64));
+            }
+            // Clear the line so the next caller's output starts clean.
+            eprint!("\r\x1b[2K");
+            let _ = io::stderr().flush();
+        });
+        Self {
+            active,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stop the spinner thread and clear the line. Idempotent — safe to
+    /// call multiple times.
+    pub fn stop(&mut self) {
+        self.active.store(false, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -258,5 +340,62 @@ mod tests {
         // something — empty parens — rather than crashing.
         let out = format_tool_call_compact("read_file", &json!({}));
         assert_eq!(out, "Read()");
+    }
+
+    // --- UX.3 spinner tests ---
+
+    #[test]
+    fn spinner_frame_cycles_through_all_frames() {
+        // After a full rotation worth of ticks we should have seen every
+        // frame at least once.
+        let mut seen = std::collections::HashSet::new();
+        for tick in 0..SPINNER_FRAMES.len() {
+            let elapsed = (tick as u128) * SPINNER_TICK_MS;
+            seen.insert(spinner_frame(elapsed));
+        }
+        assert_eq!(seen.len(), SPINNER_FRAMES.len());
+    }
+
+    #[test]
+    fn spinner_frame_at_zero_is_first_frame() {
+        assert_eq!(spinner_frame(0), SPINNER_FRAMES[0]);
+    }
+
+    #[test]
+    fn spinner_frame_wraps_after_full_rotation() {
+        let one_rotation_ms = (SPINNER_FRAMES.len() as u128) * SPINNER_TICK_MS;
+        // After exactly one rotation we should be back at frame 0.
+        assert_eq!(spinner_frame(one_rotation_ms), SPINNER_FRAMES[0]);
+        // Halfway through the next rotation should match halfway through
+        // the first.
+        assert_eq!(
+            spinner_frame(one_rotation_ms + SPINNER_TICK_MS * 3),
+            spinner_frame(SPINNER_TICK_MS * 3)
+        );
+    }
+
+    #[test]
+    fn spinner_frame_below_first_tick_is_first_frame() {
+        // Anything < SPINNER_TICK_MS is still the first frame.
+        for ms in [0, 1, 50, SPINNER_TICK_MS - 1] {
+            assert_eq!(spinner_frame(ms), SPINNER_FRAMES[0]);
+        }
+    }
+
+    #[test]
+    fn spinner_no_op_when_not_tty() {
+        // Construct with is_tty=false — the thread isn't spawned, stop is
+        // a no-op, drop is clean.
+        let mut s = Spinner::start_with_tty(false);
+        assert!(s.handle.is_none());
+        s.stop();
+    }
+
+    #[test]
+    fn spinner_stop_is_idempotent() {
+        // Calling stop twice on the no-op variant must not panic.
+        let mut s = Spinner::start_with_tty(false);
+        s.stop();
+        s.stop();
     }
 }

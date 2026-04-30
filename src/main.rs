@@ -337,13 +337,20 @@ fn run_chat(
         let mut agent = setup_agent(&cfg, &model, &loaded_skills, yolo);
 
         if cfg.llm.streaming {
+            let mut spinner = Some(agent::display::Spinner::start());
             agent.process_message_with_callbacks(
                 &msg,
                 &mut |token| {
+                    if let Some(mut s) = spinner.take() {
+                        s.stop();
+                    }
                     print!("{}", token);
                 },
                 &mut |_, _| yolo,
             );
+            if let Some(mut s) = spinner.take() {
+                s.stop();
+            }
             println!();
         } else {
             let response =
@@ -581,14 +588,22 @@ fn run_chat(
                 let start = std::time::Instant::now();
                 let streaming = cfg.llm.streaming;
                 let _response = if streaming {
-                    eprint!("{} ", "bot>".green().bold());
+                    let mut spinner = Some(agent::display::Spinner::start());
                     let response = agent.process_message_with_callbacks(
                         input,
                         &mut |token| {
+                            if let Some(mut s) = spinner.take() {
+                                s.stop();
+                                eprint!("{} ", "bot>".green().bold());
+                            }
                             eprint!("{}", token);
                         },
                         &mut |tool_name, args| ask_approval(tool_name, args),
                     );
+                    if let Some(mut s) = spinner.take() {
+                        s.stop();
+                        eprint!("{} ", "bot>".green().bold());
+                    }
                     eprintln!();
                     response
                 } else {
@@ -901,14 +916,22 @@ fn run_test_fix_loop(agent: &mut Agent, test_cmd: &str, cfg: &Config) {
 
         let streaming = cfg.llm.streaming;
         let response = if streaming {
-            eprint!("{} ", "bot>".green().bold());
+            let mut spinner = Some(agent::display::Spinner::start());
             let response = agent.process_message_with_callbacks(
                 &fix_prompt,
                 &mut |token| {
+                    if let Some(mut s) = spinner.take() {
+                        s.stop();
+                        eprint!("{} ", "bot>".green().bold());
+                    }
                     eprint!("{}", token);
                 },
                 &mut |tool_name, args| ask_approval(tool_name, args),
             );
+            if let Some(mut s) = spinner.take() {
+                s.stop();
+                eprint!("{} ", "bot>".green().bold());
+            }
             eprintln!();
             response
         } else {
