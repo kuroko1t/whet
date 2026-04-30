@@ -54,6 +54,17 @@ Use the RIGHT tool for each situation:
 | Large rewrite or new file | write_file | edit_file (too many replacements) |
 | Delete a file | shell(rm path) | (no delete tool exists) |
 | Apply multiple changes to one file | apply_diff | multiple edit_file calls |
+| Investigation that reads many files (>5) | subagent | read_file on each yourself (clutters context) |
+
+## DELEGATING TO A SUBAGENT
+
+Use the `subagent` tool when a subtask is large enough that doing it inline would clutter your working context. Good cases:
+
+- Investigation across many files: \"find all callers of FooBar\", \"map every error type in the codebase\". The subagent reads, you get a summary.
+- Self-contained verification: \"run cargo test and tell me which tests fail and why\".
+- Independent side-quests: handling one bug while you continue on another.
+
+DO NOT delegate trivial tasks (1-2 tool calls). The overhead of spinning up a subagent is not worth it for small work. Subagents cannot themselves spawn subagents.
 
 ## HANDLING VAGUE REQUESTS
 

@@ -284,10 +284,14 @@ impl Agent {
             self.compress_context();
         }
 
-        let tool_defs = if self.config.plan_mode {
-            self.tools.safe_definitions()
+        // Own the tool definitions for this turn so we can call &mut self
+        // methods (e.g. run_subagent) inside the loop without conflicting
+        // with a borrow on self.tools. Clone is shallow — definitions are
+        // small structs, one allocation per turn.
+        let tool_defs: Vec<crate::llm::ToolDefinition> = if self.config.plan_mode {
+            self.tools.safe_definitions().to_vec()
         } else {
-            self.tools.definitions()
+            self.tools.definitions().to_vec()
         };
 
         let mut reprompt_count: usize = 0;
@@ -319,7 +323,7 @@ impl Agent {
                 break;
             }
             iteration += 1;
-            let response = match self.llm.chat_streaming(&self.memory, tool_defs, on_token) {
+            let response = match self.llm.chat_streaming(&self.memory, &tool_defs, on_token) {
                 Ok(resp) => resp,
                 Err(e) => {
                     emit_session_end(&self.config.stats_jsonl_path, &self.stats, "llm_error");
@@ -439,6 +443,30 @@ impl Agent {
                             ),
                             false,
                         )
+                    } else if tool_call.name == "subagent" {
+                        // Phase C: model-callable subagent. Special-cased before
+                        // the generic dispatch because the child loop needs full
+                        // mutable Agent state (memory swap, read-paths reset),
+                        // which Tool::execute(args) cannot provide.
+                        let task = tool_call.arguments["task"].as_str().unwrap_or("");
+                        if task.is_empty() {
+                            (
+                                "Tool error: subagent requires a non-empty 'task' argument"
+                                    .to_string(),
+                                false,
+                            )
+                        } else {
+                            let context = tool_call.arguments["context"].as_str().unwrap_or("");
+                            let brief = if context.is_empty() {
+                                task.to_string()
+                            } else {
+                                format!("Task: {}\n\nContext:\n{}", task, context)
+                            };
+                            match self.run_subagent(&brief, on_token, on_approve) {
+                                Ok(text) => (text, true),
+                                Err(e) => (format!("Tool error: {}", e), false),
+                            }
+                        }
                     } else if let Some(tool) = self.tools.get(&tool_call.name) {
                         // Determine effective risk level (dynamic for git)
                         let effective_risk = if tool_call.name == "git" {
@@ -2767,6 +2795,94 @@ mod tests {
         assert!(err.contains("nesting"), "unexpected error: {}", err);
         // Depth wasn't mutated by the rejected call.
         assert_eq!(agent.subagent_depth, MAX_SUBAGENT_DEPTH);
+    }
+
+    #[test]
+    fn test_model_call_to_subagent_tool_dispatches_to_run_subagent() {
+        // Phase C: when the LLM emits a tool_call with name="subagent",
+        // the agent loop must intercept it and route to run_subagent
+        // (NOT to the SubagentTool stub's execute, which returns an
+        // error). The child loop produces a final string; the parent
+        // sees that string as the tool result.
+        let llm = MockLlm::new(vec![
+            // Parent turn: model emits a subagent call.
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "subagent".to_string(),
+                    arguments: serde_json::json!({"task": "investigate X"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Child turn: subagent finishes with a text response.
+            LlmResponse {
+                content: Some("found 3 things".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // Parent turn 2: parent finishes after seeing child's result.
+            LlmResponse {
+                content: Some("done".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let answer = agent.process_message_with_callbacks("hi", &mut |_| {}, &mut |_, _| true);
+        // Parent's final answer is "done" — the subagent's result
+        // ("found 3 things") was injected as a tool_result message
+        // back to the parent loop.
+        assert_eq!(answer, "done");
+        // Confirm the tool_result message is in parent memory and
+        // contains the child's output.
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("found 3 things"),
+            "child result not threaded back to parent: {:?}",
+            combined
+        );
+    }
+
+    #[test]
+    fn test_model_call_to_subagent_with_empty_task_returns_tool_error() {
+        // The model called subagent with no task — the parent should
+        // surface a tool-error message and continue, not crash.
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "subagent".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // After the error, parent recovers with a text response.
+            LlmResponse {
+                content: Some("recovered".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let _ = agent.process_message_with_callbacks("hi", &mut |_| {}, &mut |_, _| true);
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("non-empty 'task'"),
+            "expected tool-error about empty task, got: {:?}",
+            combined
+        );
     }
 
     #[test]

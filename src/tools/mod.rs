@@ -6,6 +6,7 @@ pub mod list_dir;
 pub mod read_file;
 pub mod repo_map;
 pub mod shell;
+pub mod subagent;
 pub mod web_fetch;
 pub mod web_search;
 pub mod write_file;
@@ -144,6 +145,7 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Box::new(git::GitTool));
     registry.register(Box::new(repo_map::RepoMapTool));
     registry.register(Box::new(apply_diff::ApplyDiffTool));
+    registry.register(Box::new(subagent::SubagentTool));
     registry
 }
 
@@ -162,7 +164,7 @@ mod tests {
     fn test_registry_register_and_list() {
         let registry = default_registry();
         let tools = registry.list();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 10);
     }
 
     #[test]
@@ -177,6 +179,7 @@ mod tests {
         assert!(registry.get("git").is_some());
         assert!(registry.get("repo_map").is_some());
         assert!(registry.get("apply_diff").is_some());
+        assert!(registry.get("subagent").is_some());
         assert!(registry.get("nonexistent").is_none());
     }
 
@@ -184,7 +187,7 @@ mod tests {
     fn test_registry_definitions() {
         let registry = default_registry();
         let defs = registry.definitions();
-        assert_eq!(defs.len(), 9);
+        assert_eq!(defs.len(), 10);
         for def in defs {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());
@@ -316,11 +319,15 @@ mod tests {
         assert!(!safe_names.contains(&"git"));
         assert!(!safe_names.contains(&"apply_diff"));
 
-        // Should include read_file, list_dir, grep, repo_map
+        // Should include read_file, list_dir, grep, repo_map, subagent.
+        // Subagent is Safe because the child loop inherits plan_mode and
+        // re-applies the same approval gates per tool call — exposing it
+        // to plan mode lets the user delegate read-only investigations.
         assert!(safe_names.contains(&"read_file"));
         assert!(safe_names.contains(&"list_dir"));
         assert!(safe_names.contains(&"grep"));
         assert!(safe_names.contains(&"repo_map"));
+        assert!(safe_names.contains(&"subagent"));
     }
 
     #[test]
