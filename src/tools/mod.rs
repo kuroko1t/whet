@@ -4,6 +4,7 @@ pub mod git;
 pub mod grep;
 pub mod list_dir;
 pub mod read_file;
+pub mod remember;
 pub mod repo_map;
 pub mod shell;
 pub mod subagent;
@@ -146,6 +147,7 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Box::new(repo_map::RepoMapTool));
     registry.register(Box::new(apply_diff::ApplyDiffTool));
     registry.register(Box::new(subagent::SubagentTool));
+    registry.register(Box::new(remember::RememberTool));
     registry
 }
 
@@ -164,7 +166,7 @@ mod tests {
     fn test_registry_register_and_list() {
         let registry = default_registry();
         let tools = registry.list();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
     }
 
     #[test]
@@ -180,6 +182,7 @@ mod tests {
         assert!(registry.get("repo_map").is_some());
         assert!(registry.get("apply_diff").is_some());
         assert!(registry.get("subagent").is_some());
+        assert!(registry.get("remember").is_some());
         assert!(registry.get("nonexistent").is_none());
     }
 
@@ -187,7 +190,7 @@ mod tests {
     fn test_registry_definitions() {
         let registry = default_registry();
         let defs = registry.definitions();
-        assert_eq!(defs.len(), 10);
+        assert_eq!(defs.len(), 11);
         for def in defs {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());
@@ -319,15 +322,17 @@ mod tests {
         assert!(!safe_names.contains(&"git"));
         assert!(!safe_names.contains(&"apply_diff"));
 
-        // Should include read_file, list_dir, grep, repo_map, subagent.
-        // Subagent is Safe because the child loop inherits plan_mode and
-        // re-applies the same approval gates per tool call — exposing it
-        // to plan mode lets the user delegate read-only investigations.
+        // Should include read_file, list_dir, grep, repo_map, subagent,
+        // remember. Subagent is Safe because the child loop inherits
+        // plan_mode and re-applies the same approval gates per tool
+        // call. Remember is Safe because it only writes to the local
+        // SQLite memory file — no external side effects.
         assert!(safe_names.contains(&"read_file"));
         assert!(safe_names.contains(&"list_dir"));
         assert!(safe_names.contains(&"grep"));
         assert!(safe_names.contains(&"repo_map"));
         assert!(safe_names.contains(&"subagent"));
+        assert!(safe_names.contains(&"remember"));
     }
 
     #[test]

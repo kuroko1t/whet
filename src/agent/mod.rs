@@ -90,12 +90,21 @@ pub struct Agent {
     /// Current subagent nesting depth (0 = parent, 1 = inside a subagent).
     /// Bounded by `MAX_SUBAGENT_DEPTH` to prevent unbounded recursion.
     subagent_depth: usize,
+    /// Callback wired to the persistent-memory store. The model invokes
+    /// it via the `remember` tool. None means no memory backend (tests,
+    /// or runs where the user disabled persistent memory).
+    on_remember: Option<RememberCallback>,
 }
 
 /// Hard cap on subagent nesting. Phase A keeps it at 1 — a subagent
 /// itself cannot spawn further subagents. Lift later if a real workflow
 /// needs deeper delegation.
 pub const MAX_SUBAGENT_DEPTH: usize = 1;
+
+/// Callback the agent loop invokes when the model calls the `remember`
+/// tool. Returns the row id assigned by the persistent-memory store on
+/// success, or a printable error on failure.
+pub type RememberCallback = Box<dyn Fn(&str) -> Result<i64, String>>;
 
 /// How an agent loop iteration concluded. Surfaced from
 /// `process_message_full` and consumed by `run_subagent` so the parent
@@ -252,7 +261,17 @@ impl Agent {
             read_paths: HashSet::new(),
             resumed: false,
             subagent_depth: 0,
+            on_remember: None,
         }
+    }
+
+    /// Wire a callback that the `remember` tool will invoke. Typical
+    /// caller (`main.rs`) closes over an `Arc<Mutex<MemoryStore>>` and
+    /// the canonical working directory so the fact is scoped to the
+    /// current project. Returning the new row id lets the agent
+    /// surface it back to the model (useful for /forget tooling).
+    pub fn set_on_remember(&mut self, cb: RememberCallback) {
+        self.on_remember = Some(cb);
     }
 
     pub fn set_resumed(&mut self, resumed: bool) {
@@ -557,67 +576,96 @@ impl Agent {
                         !self.read_paths.contains(&Self::normalize_tool_path(p))
                     });
 
-                let (result, tool_success) =
-                    if needs_read_first {
-                        let p = tool_call.arguments["path"].as_str().unwrap_or("<unknown>");
-                        (
-                            format!(
-                                "Warning: You must read_file(\"{}\") before using {}. \
+                let (result, tool_success) = if needs_read_first {
+                    let p = tool_call.arguments["path"].as_str().unwrap_or("<unknown>");
+                    (
+                        format!(
+                            "Warning: You must read_file(\"{}\") before using {}. \
                          Read the file first to see its current content, then retry.",
-                                p, tool_call.name
-                            ),
+                            p, tool_call.name
+                        ),
+                        false,
+                    )
+                } else if tool_call.name == "subagent" {
+                    // Phase C: model-callable subagent. Special-cased before
+                    // the generic dispatch because the child loop needs full
+                    // mutable Agent state (memory swap, read-paths reset),
+                    // which Tool::execute(args) cannot provide.
+                    let task = tool_call.arguments["task"].as_str().unwrap_or("");
+                    if task.is_empty() {
+                        (
+                            "Tool error: subagent requires a non-empty 'task' argument".to_string(),
                             false,
                         )
-                    } else if tool_call.name == "subagent" {
-                        // Phase C: model-callable subagent. Special-cased before
-                        // the generic dispatch because the child loop needs full
-                        // mutable Agent state (memory swap, read-paths reset),
-                        // which Tool::execute(args) cannot provide.
-                        let task = tool_call.arguments["task"].as_str().unwrap_or("");
-                        if task.is_empty() {
-                            (
-                                "Tool error: subagent requires a non-empty 'task' argument"
-                                    .to_string(),
-                                false,
-                            )
+                    } else {
+                        let context = tool_call.arguments["context"].as_str().unwrap_or("");
+                        let brief = if context.is_empty() {
+                            task.to_string()
                         } else {
-                            let context = tool_call.arguments["context"].as_str().unwrap_or("");
-                            let brief = if context.is_empty() {
-                                task.to_string()
-                            } else {
-                                format!("Task: {}\n\nContext:\n{}", task, context)
-                            };
-                            match self.run_subagent(&brief, on_token, on_approve) {
-                                // Structural classification via ExitReason —
-                                // an LlmError or MaxIterations marks the call
-                                // as failed for parent stats and the parent
-                                // model's view, no string-prefix heuristic.
-                                Ok((text, reason)) => (text, reason.is_success()),
-                                Err(e) => (format!("Tool error: {}", e), false),
-                            }
-                        }
-                    } else if let Some(tool) = self.tools.get(&tool_call.name) {
-                        // Determine effective risk level (dynamic for git)
-                        let effective_risk = if tool_call.name == "git" {
-                            let git_cmd = tool_call.arguments["command"].as_str().unwrap_or("");
-                            crate::tools::git::git_command_risk_level(git_cmd)
-                        } else {
-                            tool.risk_level()
+                            format!("Task: {}\n\nContext:\n{}", task, context)
                         };
-
-                        // In plan mode, block non-safe tools
-                        if self.config.plan_mode && effective_risk != ToolRiskLevel::Safe {
-                            ("Tool blocked: plan mode is active (read-only). Use /plan to toggle."
-                            .to_string(), false)
-                        } else if self.needs_approval(effective_risk) {
-                            if !on_approve(&tool_call.name, &tool_call.arguments) {
-                                ("Tool execution denied by user.".to_string(), false)
-                            } else {
-                                match tool.execute(tool_call.arguments.clone()) {
-                                    Ok(output) => (output, true),
-                                    Err(e) => (format!("Tool error: {}", e), false),
-                                }
+                        match self.run_subagent(&brief, on_token, on_approve) {
+                            // Structural classification via ExitReason —
+                            // an LlmError or MaxIterations marks the call
+                            // as failed for parent stats and the parent
+                            // model's view, no string-prefix heuristic.
+                            Ok((text, reason)) => (text, reason.is_success()),
+                            Err(e) => (format!("Tool error: {}", e), false),
+                        }
+                    }
+                } else if tool_call.name == "remember" {
+                    // Persistent memory tool. Routed via the on_remember
+                    // callback because Tool::execute() cannot reach the
+                    // SQLite store. If no callback is wired (e.g. tests
+                    // or memory-disabled runs), surface a clear error so
+                    // the model doesn't think the fact was saved.
+                    let content = tool_call.arguments["content"].as_str().unwrap_or("");
+                    if content.trim().is_empty() {
+                        (
+                            "Tool error: remember requires a non-empty 'content' argument"
+                                .to_string(),
+                            false,
+                        )
+                    } else if let Some(cb) = self.on_remember.as_ref() {
+                        match cb(content) {
+                                Ok(id) => (
+                                    format!(
+                                        "Remembered (id={}). This fact will appear in future sessions for this project.",
+                                        id
+                                    ),
+                                    true,
+                                ),
+                                Err(e) => (
+                                    format!("Tool error: failed to persist memory: {}", e),
+                                    false,
+                                ),
                             }
+                    } else {
+                        (
+                            "Tool error: persistent memory is not configured for this session"
+                                .to_string(),
+                            false,
+                        )
+                    }
+                } else if let Some(tool) = self.tools.get(&tool_call.name) {
+                    // Determine effective risk level (dynamic for git)
+                    let effective_risk = if tool_call.name == "git" {
+                        let git_cmd = tool_call.arguments["command"].as_str().unwrap_or("");
+                        crate::tools::git::git_command_risk_level(git_cmd)
+                    } else {
+                        tool.risk_level()
+                    };
+
+                    // In plan mode, block non-safe tools
+                    if self.config.plan_mode && effective_risk != ToolRiskLevel::Safe {
+                        (
+                            "Tool blocked: plan mode is active (read-only). Use /plan to toggle."
+                                .to_string(),
+                            false,
+                        )
+                    } else if self.needs_approval(effective_risk) {
+                        if !on_approve(&tool_call.name, &tool_call.arguments) {
+                            ("Tool execution denied by user.".to_string(), false)
                         } else {
                             match tool.execute(tool_call.arguments.clone()) {
                                 Ok(output) => (output, true),
@@ -625,8 +673,14 @@ impl Agent {
                             }
                         }
                     } else {
-                        (format!("Unknown tool: {}", tool_call.name), false)
-                    };
+                        match tool.execute(tool_call.arguments.clone()) {
+                            Ok(output) => (output, true),
+                            Err(e) => (format!("Tool error: {}", e), false),
+                        }
+                    }
+                } else {
+                    (format!("Unknown tool: {}", tool_call.name), false)
+                };
 
                 self.stats.record_tool_call(tool_success);
                 if tool_success {
@@ -3019,6 +3073,174 @@ mod tests {
             "expected tool-error about empty task, got: {:?}",
             combined
         );
+    }
+
+    // --- Persistent memory (remember tool) ---
+
+    #[test]
+    fn test_remember_tool_routes_to_on_remember_callback_with_assigned_id() {
+        // The model emits a `remember` tool call → agent loop intercepts it →
+        // dispatches to the on_remember callback → callback returns a row id.
+        // Parent stats record the call as a successful tool call, and the
+        // tool result string contains the assigned id so the model can
+        // refer to it (e.g. for /forget guidance).
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let recorded: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let llm = MockLlm::new(vec![
+            // Parent: emit remember call.
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "r1".to_string(),
+                    name: "remember".to_string(),
+                    arguments: serde_json::json!({"content": "uses pnpm not npm"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Parent: text response after tool result.
+            LlmResponse {
+                content: Some("noted".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let recorded_w = Rc::clone(&recorded);
+        agent.set_on_remember(Box::new(move |fact| {
+            recorded_w.borrow_mut().push(fact.to_string());
+            Ok(42) // pretend the store assigned id=42
+        }));
+
+        let _ = agent.process_message_with_callbacks("anything", &mut |_| {}, &mut |_, _| true);
+
+        assert_eq!(
+            recorded.borrow().as_slice(),
+            &["uses pnpm not npm".to_string()]
+        );
+        // The success message threaded back to the model includes the id.
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("Remembered (id=42)"),
+            "expected id surfaced in tool result, got: {:?}",
+            combined
+        );
+        assert_eq!(agent.stats.tool_calls_ok, 1);
+        assert_eq!(agent.stats.tool_calls_failed, 0);
+    }
+
+    #[test]
+    fn test_remember_with_empty_content_is_a_tool_error() {
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "r1".to_string(),
+                    name: "remember".to_string(),
+                    arguments: serde_json::json!({"content": "   "}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        agent.set_on_remember(Box::new(|_| Ok(0)));
+        let _ = agent.process_message_with_callbacks("x", &mut |_| {}, &mut |_, _| true);
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("non-empty 'content'"),
+            "expected empty-content tool error, got: {:?}",
+            combined
+        );
+        assert_eq!(agent.stats.tool_calls_failed, 1);
+    }
+
+    #[test]
+    fn test_remember_without_callback_returns_clear_error() {
+        // When on_remember is not wired (e.g. memory-disabled run), the
+        // tool call must surface a diagnostic rather than silently
+        // pretending the fact was stored.
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "r1".to_string(),
+                    name: "remember".to_string(),
+                    arguments: serde_json::json!({"content": "fact"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        // No set_on_remember call.
+        let _ = agent.process_message_with_callbacks("x", &mut |_| {}, &mut |_, _| true);
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("not configured"),
+            "expected 'not configured' error, got: {:?}",
+            combined
+        );
+        assert_eq!(agent.stats.tool_calls_failed, 1);
+    }
+
+    #[test]
+    fn test_remember_callback_error_propagates_as_tool_failure() {
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "r1".to_string(),
+                    name: "remember".to_string(),
+                    arguments: serde_json::json!({"content": "fact"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        agent.set_on_remember(Box::new(|_| Err("disk full".to_string())));
+        let _ = agent.process_message_with_callbacks("x", &mut |_| {}, &mut |_, _| true);
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("disk full"),
+            "expected store error surfaced, got: {:?}",
+            combined
+        );
+        assert_eq!(agent.stats.tool_calls_failed, 1);
     }
 
     #[test]
