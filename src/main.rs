@@ -820,8 +820,12 @@ fn handle_slash_command(
                 "/doctor".cyan()
             );
             println!(
-                "  {} <task>  - Run a focused subagent on <task> (isolated context)",
+                "  {} <task>  - Run a focused subagent on <task> (isolated context).",
                 "/agent".cyan()
+            );
+            println!(
+                "             {}",
+                "The agent itself can also call subagent autonomously.".dimmed()
             );
             println!("  {}           - Generate WHET.md template", "/init".cyan());
             println!(
@@ -946,8 +950,13 @@ fn run_agent_subtask(agent: &mut Agent, task: &str, cfg: &Config) {
     };
 
     match result {
-        Ok(text) => {
-            println!("{}", "Subagent result:".cyan().bold());
+        Ok((text, reason)) => {
+            let header = if reason.is_success() {
+                "Subagent result:".cyan().bold()
+            } else {
+                "Subagent stopped early:".yellow().bold()
+            };
+            println!("{}", header);
             println!("{}", text);
         }
         Err(e) => {
