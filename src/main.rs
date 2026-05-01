@@ -319,6 +319,83 @@ fn wire_persistent_memory(
     }));
 }
 
+/// Single-shot helper: if `resume_arg` or `continue_conv` is set,
+/// load the matching past conversation's messages into
+/// `agent.memory` so the next `process_message_with_callbacks` call
+/// has full context. Quiet (no "you>"/"bot>" replay output) — the
+/// REPL path has its own richer presentation; single-shot users just
+/// want their question answered.
+fn load_resumed_history_into_agent(
+    agent: &mut Agent,
+    memory_handle: Option<&std::rc::Rc<std::cell::RefCell<MemoryStore>>>,
+    working_dir: &str,
+    resume_arg: Option<&str>,
+    continue_conv: bool,
+) {
+    let Some(handle) = memory_handle else { return };
+    let store = handle.borrow();
+
+    let resume_id: Option<String> = match resume_arg {
+        Some(id) if !id.is_empty() => Some(id.to_string()),
+        Some(_) => {
+            // Empty `--resume` (no id, no picker possible in single-
+            // shot since it's not interactive). Fall through to None.
+            None
+        }
+        None if continue_conv => store.get_latest_conversation_id(working_dir).ok().flatten(),
+        None => None,
+    };
+
+    let Some(id) = resume_id else { return };
+    let Ok(messages) = store.load_messages(&id) else {
+        return;
+    };
+    if messages.is_empty() {
+        return;
+    }
+
+    let mut has_tool_messages = false;
+    for (role, content, tool_call_id, tool_calls_json) in &messages {
+        match role.as_str() {
+            "user" => agent.memory.push(llm::Message::user(content)),
+            "assistant" => {
+                if let Some(tc_json) = tool_calls_json {
+                    if let Ok(tool_calls) = serde_json::from_str::<Vec<llm::ToolCall>>(tc_json) {
+                        for tc in &tool_calls {
+                            if tc.name == "read_file" {
+                                if let Some(p) = tc.arguments["path"].as_str() {
+                                    agent.add_read_path(p);
+                                }
+                            }
+                        }
+                        agent
+                            .memory
+                            .push(llm::Message::assistant_with_tool_calls(tool_calls));
+                    } else {
+                        agent.memory.push(llm::Message::assistant(content));
+                    }
+                } else {
+                    agent.memory.push(llm::Message::assistant(content));
+                }
+            }
+            "tool" => {
+                if let Some(tc_id) = tool_call_id {
+                    has_tool_messages = true;
+                    agent.memory.push(llm::Message::tool_result(tc_id, content));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !has_tool_messages {
+        agent.set_resumed(true);
+    }
+    eprintln!(
+        "{}",
+        format!("Resumed {} ({} messages).", id, messages.len()).dimmed()
+    );
+}
+
 fn pick_session(store: &MemoryStore, working_dir: &str) -> Option<String> {
     let convs = match store.list_conversations(working_dir) {
         Ok(c) => c,
@@ -449,6 +526,18 @@ fn run_chat(
             single_shot_memory.as_ref(),
             &single_shot_working_dir,
             cfg.memory.max_inject_memories,
+        );
+
+        // Single-shot honour for --resume / --continue: load the past
+        // conversation into agent.memory before processing the new
+        // user message, so `whet -c -p "summarise"` actually summarises
+        // the previous session instead of starting fresh.
+        load_resumed_history_into_agent(
+            &mut agent,
+            single_shot_memory.as_ref(),
+            &single_shot_working_dir,
+            resume.as_deref(),
+            continue_conv,
         );
 
         if cfg.llm.streaming {
