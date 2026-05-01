@@ -63,18 +63,20 @@ whet -m claude-sonnet-4-5-20250929
 $ whet
 
 whet v0.1.0
-Model: qwen3:8b
+Model: qwen3.5:9b
 Permission: default
 Type Ctrl+D to exit.
 
 you> Find all deprecation warnings and fix them
 
-  [tool: grep] {"pattern": "deprecated", "path": "."}
+  Grep(deprecated)
 
 I found 3 deprecation warnings. Let me fix them one by one.
 
-  [tool: read_file] {"path": "src/main.rs"}
-  [tool: edit_file] {"path": "src/main.rs", ...}
+  Read(src/main.rs)
+  Edit(src/main.rs)
+- use old_module::deprecated_fn;
++ use new_module::updated_fn;
 
   Tool 'edit_file' wants to execute:
     path: src/main.rs
@@ -85,6 +87,8 @@ I found 3 deprecation warnings. Let me fix them one by one.
 Done! Fixed all 3 deprecation warnings.
 (2.3s)
 ```
+
+> Tool calls render in compact form (`Read(path)`, `Edit(path)`). Each successful `edit_file` / `apply_diff` shows a colored unified-style diff. A braille spinner indicates "thinking…" while waiting for the first streamed token. All TTY-aware — non-interactive runs (`whet -p ... 2>file`) stay clean.
 
 ## Key Features
 
@@ -98,7 +102,7 @@ whet   # in a project with WHET.md → instructions are loaded automatically
 
 Use `/init` to generate a starter template.
 
-### 11 Built-in Tools
+### 12 Built-in Tools
 
 | Tool | Category | Description |
 |---|---|---|
@@ -111,10 +115,53 @@ Use `/init` to generate a starter template.
 | `repo_map` | Search | Show project structure with definitions |
 | `shell` | System | Execute a shell command |
 | `git` | System | Git commands with safety tiers |
+| `subagent` | Agent | Delegate a focused subtask to a child agent (isolated context) |
 | `web_fetch` | Web | Fetch and extract text from a URL |
 | `web_search` | Web | Search the web via DuckDuckGo |
 
 > Web tools are disabled by default. Enable with `web_enabled = true` in config.
+
+### Subagents
+
+For investigations or self-contained subtasks, the agent can delegate to a child loop with isolated memory and read-tracking:
+
+```
+you> /agent enumerate every place process_event() is called
+
+  Subagent: enumerate every place process_event() is called
+    Grep(process_event\()
+    Read(handlers/login.py)
+    Read(handlers/payment.py)
+    ...
+  Subagent result:
+  - handlers/login.py:6
+  - handlers/payment.py:6, :12
+  ...
+```
+
+The model itself can also call `subagent` autonomously when it judges the subtask large enough. The child:
+- shares the parent's LLM, tools, and stats accumulator
+- gets a **fresh memory + read_paths** so its work doesn't pollute parent context
+- returns a single summary string back to the parent
+- cannot spawn further subagents (depth cap = 1)
+
+A `SubagentGuard` RAII struct restores parent state on Drop, so even if the child loop panics the parent stays consistent.
+
+### Diagnostics (`/doctor`)
+
+```
+you> /doctor
+
+Whet diagnostics:
+  ✓ ollama reachable — http://localhost:11434 responded
+  ✓ model available — `qwen3.5:9b` is pulled
+  ✓ config parses — /home/you/.whet/config.toml OK
+  ✓ ~/.whet writable — /home/you/.whet OK
+  ✓ MCP servers — all 2 server binaries on PATH
+Overall: PASS
+```
+
+Five checks: ollama reachable, active `-m` model is pulled (handles implicit `:latest` tag), `~/.whet/config.toml` parses, `~/.whet` writable, all configured MCP server binaries are on `$PATH`.
 
 ### Git Safety Tiers
 
@@ -167,6 +214,8 @@ Automatic conversation summarization prevents unbounded memory growth. Use `/com
 | `/mode <mode>` | Change permission mode (`default` / `accept_edits` / `yolo`) |
 | `/plan` | Toggle plan mode (read-only analysis) |
 | `/test [cmd]` | Auto test-fix loop (default: `cargo test`, max 5 rounds) |
+| `/doctor` | Run diagnostics: ollama, model, config, MCP, `~/.whet` |
+| `/agent <task>` | Run a focused subagent on `<task>` in isolated context |
 | `/init` | Generate `WHET.md` template in current directory |
 | `/compact [msg]` | Compress conversation context (optional custom instruction) |
 | `/skills` | List loaded skill files |
@@ -279,13 +328,18 @@ whet config                      # show current configuration
 | Permission system | 3 modes | Yes |
 | Session management | `--resume` / `--continue` | `--resume` / `--continue` |
 | Context compression | Yes (auto + manual) | Yes |
+| Subagents (isolated context) | Sequential, model- and `/agent`-callable | Yes (parallel) |
+| Diagnostics | `/doctor` (ollama / model / config / MCP) | `/doctor` |
+| Diff preview after edits | Yes (red `-` / green `+`, TTY-gated) | Yes |
 
 ## Benchmark Results
 
-Whet ships with a reproducible benchmark suite of 11 coding tasks covering
+Whet ships with a reproducible benchmark suite of 12 coding tasks covering
 single-file edits, multi-file refactors, planning chains, security fixes,
-TDD-style test generation, and one TypeScript task. Each task has a tamper-proof
-verifier (SHA-pinned tests where applicable, mutation testing for task12).
+TDD-style test generation, one TypeScript task, and one delegation-friendly
+callsite-enumeration task across 16 files. Each task has a tamper-proof
+verifier (SHA-pinned source pins where applicable, mutation testing for task12,
+false-positive rejection for task14_callsites).
 
 The numbers below are from a single RTX 5060 Ti (16GB VRAM) running
 `scripts/run_bench.sh -n 3` with `temperature=0`, `seed=42`,
@@ -339,7 +393,7 @@ whet (single binary)
                         |     Ollama / OpenAI / Anthropic / Gemini
                         |
                         +-- Tool Executor
-                        |     11 built-in + MCP + Skills
+                        |     12 built-in (incl. subagent) + MCP + Skills
                         |
                         +-- Security Layer
                         |     Path safety, Permissions, Git safety tiers
