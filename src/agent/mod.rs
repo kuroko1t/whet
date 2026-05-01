@@ -530,6 +530,14 @@ impl Agent {
             self.memory
                 .push(Message::assistant_with_tool_calls(tool_calls.clone()));
 
+            // Notify the caller's on_token closure that the model has
+            // committed to action — this lets a "thinking…" spinner /
+            // placeholder stop and clear its line BEFORE we start
+            // emitting tool-call lines below, avoiding the race where
+            // both share a row. The empty-string payload is a no-op
+            // print for callers that just append text.
+            on_token("");
+
             for tool_call in &tool_calls {
                 eprintln!(
                     "  {}",
@@ -1445,8 +1453,12 @@ mod tests {
         });
 
         assert_eq!(response, "The project.");
-        // Tokens should come from the second call (after tool execution)
-        assert_eq!(received_tokens, vec!["The ", "project", "."]);
+        // Real streamed tokens should come from the second call (after
+        // tool execution). The agent loop also fires on_token("") just
+        // before printing tool-call lines so callers can stop spinners
+        // without racing — filter those out for the content assertion.
+        let real_tokens: Vec<&String> = received_tokens.iter().filter(|t| !t.is_empty()).collect();
+        assert_eq!(real_tokens, vec!["The ", "project", "."]);
     }
 
     #[test]
@@ -3159,6 +3171,47 @@ mod tests {
         assert_eq!(reason, ExitReason::MaxIterations);
         assert!(!reason.is_success());
         assert!(text.starts_with("Max iterations reached"));
+    }
+
+    #[test]
+    fn test_on_token_empty_signal_fires_before_tool_call_prints() {
+        // The agent loop sends an empty-string `on_token("")` BEFORE
+        // printing tool-call lines, so a caller-installed "thinking…"
+        // spinner can stop and clear its line without racing with the
+        // tool-call output that follows. Regression guard for the UX.3
+        // / UX.1 race we surfaced when capturing the README screenshot.
+        let llm = MockLlm::new(vec![
+            // First turn: model emits a tool call (no text).
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: serde_json::json!({"path": "."}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Second turn: real text response.
+            LlmResponse {
+                content: Some("done".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let mut tokens: Vec<String> = Vec::new();
+        let _ = agent.process_message_with_callbacks(
+            "go",
+            &mut |t| tokens.push(t.to_string()),
+            &mut |_, _| true,
+        );
+        // First token must be the empty-string signal — guarantees the
+        // spinner stop fires before any tool-call eprintln below.
+        assert!(
+            tokens.first().is_some_and(|t| t.is_empty()),
+            "expected empty-string first token before tool-call output, got {:?}",
+            tokens
+        );
     }
 
     #[test]
