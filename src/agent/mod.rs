@@ -323,11 +323,64 @@ impl Agent {
     /// messages but 6 K tokens of file contents triggers compaction
     /// before context decay sets in, while a 50-turn quick chat with
     /// short replies stays uncompressed.
+    ///
+    /// When summarisation alone can't bring memory under the budget
+    /// (e.g. only 2-3 messages but one is a 30 KB tool-result paste),
+    /// a fallback per-message head+tail truncation kicks in so a
+    /// single oversized message can't keep memory in the decay zone.
     fn compress_context(&mut self) {
         if approx_token_count(&self.memory) <= self.config.compaction_token_threshold {
             return;
         }
         self.compress_context_with_instruction(None);
+        // Summarisation may have been a no-op (history too short to
+        // have anything to summarise). If we're still over budget,
+        // shrink any individual oversized middle message in place.
+        if approx_token_count(&self.memory) > self.config.compaction_token_threshold {
+            self.truncate_oversized_messages();
+        }
+    }
+
+    /// Fallback compaction: truncate any middle message whose body is
+    /// larger than `MAX_PER_MESSAGE_CHARS` to its head + tail with a
+    /// `[N chars truncated …]` marker between. Skips:
+    ///
+    /// - the system prompt at index 0 (load-bearing instructions),
+    /// - the most recent message (likely the active user input or a
+    ///   just-arrived tool-result the model hasn't processed yet).
+    ///
+    /// Idempotent: a message already shorter than the cap is left
+    /// alone, so repeated invocations don't degrade content further.
+    fn truncate_oversized_messages(&mut self) {
+        const MAX_PER_MESSAGE_CHARS: usize = 8000; // ~2 K tokens
+        const TRUNC_HEAD_CHARS: usize = 4000;
+        const TRUNC_TAIL_CHARS: usize = 2000;
+        let len = self.memory.len();
+        if len < 3 {
+            return;
+        }
+        let last_idx = len - 1;
+        for i in 1..last_idx {
+            let total = self.memory[i].content.chars().count();
+            if total <= MAX_PER_MESSAGE_CHARS {
+                continue;
+            }
+            let head: String = self.memory[i]
+                .content
+                .chars()
+                .take(TRUNC_HEAD_CHARS)
+                .collect();
+            let tail: String = self.memory[i]
+                .content
+                .chars()
+                .skip(total - TRUNC_TAIL_CHARS)
+                .collect();
+            let middle = total - TRUNC_HEAD_CHARS - TRUNC_TAIL_CHARS;
+            self.memory[i].content = format!(
+                "{}\n\n... [{} chars truncated for context budget; original {} chars] ...\n\n{}",
+                head, middle, total, tail
+            );
+        }
     }
 
     /// Manually compress the conversation context.
@@ -3414,6 +3467,164 @@ mod tests {
         assert!(
             !combined.contains("Previous conversation summary"),
             "compaction fired despite context_compression=false"
+        );
+    }
+
+    #[test]
+    fn test_huge_single_message_truncated_when_summarisation_cannot_help() {
+        // Edge case fixed by the fallback truncation pass:
+        // a 60 KB tool-result message in a 3-message conversation
+        // ([system, tool_result, user_input]). Summarisation alone
+        // returns early (`keep_from <= 1`), so a "static" model
+        // would have left memory at ~15 K tokens — well into the
+        // decay zone for a 9 K context. The truncation fallback
+        // shrinks the middle message to head + tail markers.
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: Some("ok".to_string()),
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        }]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig {
+                compaction_token_threshold: 1000,
+                ..AgentConfig::default()
+            },
+            &[],
+        );
+        let huge = "x".repeat(60_000); // ~15 K tokens
+        agent.memory.push(Message::tool_result("c1", &huge));
+
+        let tokens_before = approx_token_count(&agent.memory);
+        assert!(tokens_before > 10_000, "setup precondition failed");
+
+        let _ = agent.process_message_with_callbacks("hi", &mut |_| {}, &mut |_, _| true);
+
+        let tokens_after = approx_token_count(&agent.memory);
+        assert!(
+            tokens_after < tokens_before / 4,
+            "huge message not shrunk: before {} tok, after {} tok",
+            tokens_before,
+            tokens_after
+        );
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("truncated for context budget"),
+            "expected truncation marker in memory; got first 500 chars: {}",
+            combined.chars().take(500).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn test_truncation_pass_skips_system_prompt_and_latest_message() {
+        // The fallback pass must NOT touch:
+        //   - memory[0] (system prompt — load-bearing instructions)
+        //   - the just-pushed user input that triggered compaction
+        //     (the model still needs to read it untouched)
+        // Compaction runs AFTER the user input is pushed but BEFORE
+        // the LLM responds, so during compaction `len-1` is the
+        // user input. After the LLM responds, the assistant message
+        // is appended, so we look up the user input at len-2.
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: Some("ok".to_string()),
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        }]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig {
+                compaction_token_threshold: 100,
+                ..AgentConfig::default()
+            },
+            &[],
+        );
+        let original_system = "x".repeat(50_000);
+        agent.memory[0].content = original_system.clone();
+        agent.memory.push(Message::user("middle"));
+        let huge_user = "y".repeat(50_000);
+
+        let _ = agent.process_message_with_callbacks(&huge_user, &mut |_| {}, &mut |_, _| true);
+
+        // System prompt at index 0 untouched.
+        assert_eq!(
+            agent.memory[0].content.len(),
+            50_000,
+            "system prompt should not have been truncated"
+        );
+        // The user input that triggered compaction is now at len-2
+        // (the assistant response was pushed after). It must remain
+        // at full 50 K chars — compaction should have skipped it.
+        let user_msg = &agent.memory[agent.memory.len() - 2];
+        assert_eq!(
+            user_msg.role,
+            crate::llm::Role::User,
+            "expected user role at len-2"
+        );
+        assert!(
+            user_msg.content.len() >= 50_000,
+            "user input that triggered compaction should not have been truncated; got {} chars",
+            user_msg.content.len()
+        );
+    }
+
+    #[test]
+    fn test_truncation_pass_is_idempotent() {
+        // Running compaction twice on the same already-compacted
+        // memory must not re-truncate (and especially must not
+        // produce nested marker messages).
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("ok again".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig {
+                compaction_token_threshold: 1000,
+                ..AgentConfig::default()
+            },
+            &[],
+        );
+        agent
+            .memory
+            .push(Message::tool_result("c1", &"x".repeat(60_000)));
+
+        let _ = agent.process_message_with_callbacks("first", &mut |_| {}, &mut |_, _| true);
+        let after_first: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let marker_count_first = after_first.matches("truncated for context budget").count();
+
+        let _ = agent.process_message_with_callbacks("second", &mut |_| {}, &mut |_, _| true);
+        let after_second: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let marker_count_second = after_second.matches("truncated for context budget").count();
+
+        assert_eq!(
+            marker_count_first, marker_count_second,
+            "second compaction added a duplicate truncation marker"
         );
     }
 
