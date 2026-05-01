@@ -299,6 +299,7 @@ mod tests {
             },
             memory: MemoryConfig {
                 database_path: ":memory:".to_string(),
+                max_inject_memories: 50,
             },
             mcp: McpConfig { servers: vec![] },
         }

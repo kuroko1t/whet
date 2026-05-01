@@ -7,6 +7,19 @@ pub struct ConversationSummary {
     pub message_count: usize,
 }
 
+/// One persistent memory row. `working_dir == None` means a global
+/// memory (loaded into every session). When `Some`, the memory is
+/// project-scoped and only loaded when the user runs whet from that
+/// directory (or a directory whose canonical path matches).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRow {
+    pub id: i64,
+    pub working_dir: Option<String>,
+    pub content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 pub struct MemoryStore {
     conn: Connection,
 }
@@ -68,7 +81,17 @@ impl MemoryStore {
                 tool_calls TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id)
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                working_dir TEXT,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_memories_dir_active
+                ON memories(working_dir, active);",
         )?;
         // Migrations for existing databases
         let _ = self
@@ -81,6 +104,76 @@ impl MemoryStore {
             .conn
             .execute("ALTER TABLE conversations ADD COLUMN title TEXT", []);
         Ok(())
+    }
+
+    // --- Persistent memory ---
+
+    /// Insert a new memory and return its row id. Pass `None` for
+    /// `working_dir` to make the memory global (loaded into every
+    /// session); pass `Some(canonical_dir)` to scope it.
+    pub fn add_memory(&self, working_dir: Option<&str>, content: &str) -> SqliteResult<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO memories (working_dir, content, created_at, updated_at, active)
+             VALUES (?1, ?2, ?3, ?4, 1)",
+            params![working_dir, content, now, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// List active memories visible from `working_dir`: project-scoped
+    /// memories for that dir + globals. Order: globals first (older
+    /// `created_at`), then project memories newest-first.
+    pub fn list_memories(&self, working_dir: &str) -> SqliteResult<Vec<MemoryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, working_dir, content, created_at, updated_at
+             FROM memories
+             WHERE active = 1
+               AND (working_dir = ?1 OR working_dir IS NULL)
+             ORDER BY working_dir IS NOT NULL ASC, updated_at DESC",
+        )?;
+        let rows = stmt.query_map(params![working_dir], |row| {
+            Ok(MemoryRow {
+                id: row.get(0)?,
+                working_dir: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Soft-delete a memory by id. Returns true if a row was affected.
+    pub fn forget_memory(&self, id: i64) -> SqliteResult<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let n = self.conn.execute(
+            "UPDATE memories SET active = 0, updated_at = ?1 WHERE id = ?2 AND active = 1",
+            params![now, id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// All memories regardless of dir / active flag — for `whet memories
+    /// --all` style debugging. Not currently exposed via slash; kept as
+    /// a low-level escape hatch.
+    #[allow(dead_code)]
+    pub fn list_all_memories(&self) -> SqliteResult<Vec<MemoryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, working_dir, content, created_at, updated_at
+             FROM memories WHERE active = 1
+             ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MemoryRow {
+                id: row.get(0)?,
+                working_dir: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
     }
 
     pub fn create_conversation(&self, id: &str, working_dir: &str) -> SqliteResult<()> {
@@ -513,5 +606,108 @@ mod tests {
         // Should also be found by get_latest
         let latest = store.get_latest_conversation_id("/any-dir").unwrap();
         assert_eq!(latest, Some("old-conv".to_string()));
+    }
+
+    // --- Persistent memory ---
+
+    #[test]
+    fn test_add_and_list_project_scoped_memory() {
+        let store = MemoryStore::in_memory().unwrap();
+        let id = store
+            .add_memory(Some("/proj/a"), "uses npm not bun")
+            .unwrap();
+        assert!(id > 0);
+        let mems = store.list_memories("/proj/a").unwrap();
+        assert_eq!(mems.len(), 1);
+        assert_eq!(mems[0].id, id);
+        assert_eq!(mems[0].working_dir.as_deref(), Some("/proj/a"));
+        assert_eq!(mems[0].content, "uses npm not bun");
+    }
+
+    #[test]
+    fn test_memories_isolated_by_working_dir() {
+        let store = MemoryStore::in_memory().unwrap();
+        store
+            .add_memory(Some("/proj/a"), "fact for project A")
+            .unwrap();
+        store
+            .add_memory(Some("/proj/b"), "fact for project B")
+            .unwrap();
+        let a = store.list_memories("/proj/a").unwrap();
+        let b = store.list_memories("/proj/b").unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        assert_eq!(a[0].content, "fact for project A");
+        assert_eq!(b[0].content, "fact for project B");
+    }
+
+    #[test]
+    fn test_global_memories_visible_from_any_dir() {
+        let store = MemoryStore::in_memory().unwrap();
+        store.add_memory(None, "global preference").unwrap();
+        let any_a = store.list_memories("/some/dir").unwrap();
+        let any_b = store.list_memories("/totally/different").unwrap();
+        assert_eq!(any_a.len(), 1);
+        assert_eq!(any_b.len(), 1);
+        assert!(any_a[0].working_dir.is_none());
+    }
+
+    #[test]
+    fn test_list_orders_globals_before_project_scoped() {
+        let store = MemoryStore::in_memory().unwrap();
+        // Insert in mixed order; project-scoped first, then global.
+        store.add_memory(Some("/proj"), "project fact").unwrap();
+        store.add_memory(None, "global fact").unwrap();
+        let mems = store.list_memories("/proj").unwrap();
+        assert_eq!(mems.len(), 2);
+        // Globals first per ORDER BY working_dir IS NOT NULL ASC.
+        assert!(mems[0].working_dir.is_none());
+        assert_eq!(mems[1].working_dir.as_deref(), Some("/proj"));
+    }
+
+    #[test]
+    fn test_forget_soft_deletes_memory() {
+        let store = MemoryStore::in_memory().unwrap();
+        let id = store.add_memory(Some("/x"), "transient").unwrap();
+        assert!(store.forget_memory(id).unwrap(), "first forget hits row");
+        let mems = store.list_memories("/x").unwrap();
+        assert!(mems.is_empty(), "soft-deleted memory not listed");
+        // Idempotency: second forget on same id is a no-op.
+        assert!(
+            !store.forget_memory(id).unwrap(),
+            "second forget should report no-op"
+        );
+    }
+
+    #[test]
+    fn test_forget_unknown_id_is_no_op() {
+        let store = MemoryStore::in_memory().unwrap();
+        assert!(!store.forget_memory(99999).unwrap());
+    }
+
+    #[test]
+    fn test_memory_persists_across_store_reopen() {
+        let path = "/tmp/whet_test_memory_persist.db";
+        std::fs::remove_file(path).ok();
+        {
+            let store = MemoryStore::new(path).unwrap();
+            store.add_memory(Some("/a"), "long-lived fact").unwrap();
+        }
+        {
+            let store = MemoryStore::new(path).unwrap();
+            let mems = store.list_memories("/a").unwrap();
+            assert_eq!(mems.len(), 1);
+            assert_eq!(mems[0].content, "long-lived fact");
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_memory_special_characters_roundtrip() {
+        let store = MemoryStore::in_memory().unwrap();
+        let content = "Use 'npm' not \"bun\". Path: /tmp/x \\ 日本語 🦀";
+        store.add_memory(Some("/x"), content).unwrap();
+        let mems = store.list_memories("/x").unwrap();
+        assert_eq!(mems[0].content, content);
     }
 }

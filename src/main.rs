@@ -217,6 +217,82 @@ fn setup_agent(cfg: &Config, model: &str, skills: &[Skill], yolo: bool) -> Agent
     Agent::new(provider, registry, agent_config, skills)
 }
 
+/// Open (or reopen) the persistent-memory SQLite handle. Used for the
+/// `remember` tool callback and the /memories|/remember|/forget slash
+/// commands. Returns `None` if the DB file can't be opened (whet keeps
+/// running without persistence in that case).
+fn open_memory_handle(cfg: &Config) -> Option<std::rc::Rc<std::cell::RefCell<MemoryStore>>> {
+    MemoryStore::new(&cfg.memory.database_path)
+        .ok()
+        .map(|s| std::rc::Rc::new(std::cell::RefCell::new(s)))
+}
+
+/// Append project-scoped + global persistent memories to the agent's
+/// system prompt and wire the `on_remember` callback that the model's
+/// `remember` tool uses to write back. Idempotent — call exactly once
+/// per Agent. Injection is capped at `cap` rows (most-recently-updated
+/// wins) to keep system-prompt growth bounded even when the user has
+/// hundreds of memories saved.
+fn wire_persistent_memory(
+    agent: &mut Agent,
+    memory_handle: Option<&std::rc::Rc<std::cell::RefCell<MemoryStore>>>,
+    working_dir: &str,
+    cap: usize,
+) {
+    let Some(handle) = memory_handle else { return };
+    let all_mems = handle
+        .borrow()
+        .list_memories(working_dir)
+        .unwrap_or_default();
+    let total = all_mems.len();
+    let mems: Vec<_> = all_mems.into_iter().take(cap).collect();
+    let truncated = total > mems.len();
+
+    if !mems.is_empty() {
+        let mut section = String::from("\n\n## Persistent memory (from past sessions)\n");
+        for m in &mems {
+            let scope = if m.working_dir.is_some() {
+                "project"
+            } else {
+                "global"
+            };
+            section.push_str(&format!("- [#{} {}] {}\n", m.id, scope, m.content));
+        }
+        if truncated {
+            section.push_str(&format!(
+                "\n(Showing {} most-recently-updated memories of {}; older ones omitted from this session — use /memories to see them all.)\n",
+                mems.len(),
+                total,
+            ));
+        }
+        section.push_str(
+            "\nThese facts were saved by you (or the user) in past sessions and are still active. \
+             Honour them unless explicitly contradicted in the current turn.\n",
+        );
+        if let Some(first) = agent.memory.first_mut() {
+            first.content.push_str(&section);
+        }
+        let label = if truncated {
+            format!(
+                "Loaded {} persistent memories ({} hidden).",
+                mems.len(),
+                total - mems.len()
+            )
+        } else {
+            format!("Loaded {} persistent memories.", mems.len())
+        };
+        eprintln!("{}", label.dimmed());
+    }
+    let writer = std::rc::Rc::clone(handle);
+    let dir = working_dir.to_string();
+    agent.set_on_remember(Box::new(move |fact| {
+        writer
+            .borrow()
+            .add_memory(Some(&dir), fact)
+            .map_err(|e| e.to_string())
+    }));
+}
+
 fn pick_session(store: &MemoryStore, working_dir: &str) -> Option<String> {
     let convs = match store.list_conversations(working_dir) {
         Ok(c) => c,
@@ -335,6 +411,19 @@ fn run_chat(
     // Single-shot mode
     if let Some(msg) = message.filter(|m| !m.trim().is_empty()) {
         let mut agent = setup_agent(&cfg, &model, &loaded_skills, yolo);
+        // Single-shot still benefits from persistent memory: the model
+        // can `remember` facts from a one-off invocation, and recalls
+        // facts from past sessions on startup.
+        let single_shot_working_dir = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let single_shot_memory = open_memory_handle(&cfg);
+        wire_persistent_memory(
+            &mut agent,
+            single_shot_memory.as_ref(),
+            &single_shot_working_dir,
+            cfg.memory.max_inject_memories,
+        );
 
         if cfg.llm.streaming {
             let mut spinner = Some(agent::display::Spinner::start());
@@ -408,6 +497,20 @@ fn run_chat(
     let working_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
+
+    // Persistent memory side-channel: a second MemoryStore handle that
+    // the `remember` tool callback and the /memories|/forget slashes
+    // share. Re-opens the same SQLite file as `store` — Rusqlite handles
+    // concurrent connections to one DB cleanly. The helper also injects
+    // any memories scoped to this working_dir into the agent's system
+    // prompt and wires the on_remember callback.
+    let memory_handle = open_memory_handle(&cfg);
+    wire_persistent_memory(
+        &mut agent,
+        memory_handle.as_ref(),
+        &working_dir,
+        cfg.memory.max_inject_memories,
+    );
 
     // Determine which conversation to load
     let resume_id: Option<String> = if let Some(ref resume_arg) = resume {
@@ -542,6 +645,8 @@ fn run_chat(
                         &mut agent,
                         &mut current_model,
                         &loaded_skills,
+                        memory_handle.as_ref(),
+                        &working_dir,
                     ) {
                         SlashResult::Handled => continue,
                         SlashResult::NewProvider(provider) => {
@@ -686,6 +791,8 @@ fn handle_slash_command(
     agent: &mut Agent,
     current_model: &mut String,
     skills: &[Skill],
+    memory_handle: Option<&std::rc::Rc<std::cell::RefCell<MemoryStore>>>,
+    working_dir: &str,
 ) -> SlashResult {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
     let cmd = parts[0];
@@ -841,6 +948,18 @@ fn handle_slash_command(
                 "             {}",
                 "The agent itself can also call subagent autonomously.".dimmed()
             );
+            println!(
+                "  {}      - List project's persistent memories",
+                "/memories".cyan()
+            );
+            println!(
+                "  {} <fact> - Manually save a persistent memory",
+                "/remember".cyan()
+            );
+            println!(
+                "  {} <id>    - Soft-delete a persistent memory",
+                "/forget".cyan()
+            );
             println!("  {}           - Generate WHET.md template", "/init".cyan());
             println!(
                 "  {} [msg] - Compress conversation context",
@@ -870,6 +989,26 @@ fn handle_slash_command(
                 return SlashResult::Handled;
             }
             run_agent_subtask(agent, arg, cfg);
+            SlashResult::Handled
+        }
+        "/memories" => {
+            run_memories_list(memory_handle, working_dir);
+            SlashResult::Handled
+        }
+        "/remember" => {
+            if arg.is_empty() {
+                eprintln!("{} usage: /remember <fact>", "Error:".red());
+                return SlashResult::Handled;
+            }
+            run_memories_add(memory_handle, working_dir, arg);
+            SlashResult::Handled
+        }
+        "/forget" => {
+            if arg.is_empty() {
+                eprintln!("{} usage: /forget <id>", "Error:".red());
+                return SlashResult::Handled;
+            }
+            run_memories_forget(memory_handle, arg);
             SlashResult::Handled
         }
         "/clear" => {
@@ -976,6 +1115,78 @@ fn run_agent_subtask(agent: &mut Agent, task: &str, cfg: &Config) {
         Err(e) => {
             eprintln!("{} subagent failed: {}", "Error:".red(), e);
         }
+    }
+}
+
+fn run_memories_list(
+    memory_handle: Option<&std::rc::Rc<std::cell::RefCell<MemoryStore>>>,
+    working_dir: &str,
+) {
+    let Some(handle) = memory_handle else {
+        eprintln!("{} persistent memory is not configured", "Error:".red());
+        return;
+    };
+    let mems = match handle.borrow().list_memories(working_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{} {}", "Error:".red(), e);
+            return;
+        }
+    };
+    if mems.is_empty() {
+        println!("{}", "No persistent memories for this project.".dimmed());
+        return;
+    }
+    println!("{}", "Persistent memories:".bold());
+    for m in mems {
+        let scope = if m.working_dir.is_some() {
+            "project".dimmed()
+        } else {
+            "global".cyan().dimmed()
+        };
+        println!("  {} {} {}", format!("[{}]", m.id).cyan(), scope, m.content);
+    }
+}
+
+fn run_memories_add(
+    memory_handle: Option<&std::rc::Rc<std::cell::RefCell<MemoryStore>>>,
+    working_dir: &str,
+    fact: &str,
+) {
+    let Some(handle) = memory_handle else {
+        eprintln!("{} persistent memory is not configured", "Error:".red());
+        return;
+    };
+    match handle.borrow().add_memory(Some(working_dir), fact) {
+        Ok(id) => println!(
+            "{} {} {}",
+            "Remembered".green().bold(),
+            format!("[id={}]", id).dimmed(),
+            fact
+        ),
+        Err(e) => eprintln!("{} {}", "Error:".red(), e),
+    }
+}
+
+fn run_memories_forget(
+    memory_handle: Option<&std::rc::Rc<std::cell::RefCell<MemoryStore>>>,
+    id_str: &str,
+) {
+    let Some(handle) = memory_handle else {
+        eprintln!("{} persistent memory is not configured", "Error:".red());
+        return;
+    };
+    let id: i64 = match id_str.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            eprintln!("{} id must be a number, got {:?}", "Error:".red(), id_str);
+            return;
+        }
+    };
+    match handle.borrow().forget_memory(id) {
+        Ok(true) => println!("{} memory id={}", "Forgot".green().bold(), id),
+        Ok(false) => println!("{} no active memory with id={}", "Notice:".yellow(), id),
+        Err(e) => eprintln!("{} {}", "Error:".red(), e),
     }
 }
 
