@@ -110,6 +110,17 @@ fn default_skills_dir() -> String {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MemoryConfig {
     pub database_path: String,
+    /// Cap on the number of persistent memories injected into the
+    /// system prompt at session start. Most-recently-updated wins.
+    /// Set to 0 to disable injection entirely; set very large (e.g.
+    /// 10000) to inject all. Default 50 keeps prompt growth bounded
+    /// (~1k–2k tokens at typical fact length) on small `num_ctx` models.
+    #[serde(default = "default_max_inject_memories")]
+    pub max_inject_memories: usize,
+}
+
+fn default_max_inject_memories() -> usize {
+    50
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -146,6 +157,7 @@ impl Default for Config {
             },
             memory: MemoryConfig {
                 database_path: "~/.whet/memory.db".to_string(),
+                max_inject_memories: default_max_inject_memories(),
             },
             mcp: McpConfig::default(),
         }

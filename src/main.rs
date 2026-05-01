@@ -230,17 +230,24 @@ fn open_memory_handle(cfg: &Config) -> Option<std::rc::Rc<std::cell::RefCell<Mem
 /// Append project-scoped + global persistent memories to the agent's
 /// system prompt and wire the `on_remember` callback that the model's
 /// `remember` tool uses to write back. Idempotent — call exactly once
-/// per Agent.
+/// per Agent. Injection is capped at `cap` rows (most-recently-updated
+/// wins) to keep system-prompt growth bounded even when the user has
+/// hundreds of memories saved.
 fn wire_persistent_memory(
     agent: &mut Agent,
     memory_handle: Option<&std::rc::Rc<std::cell::RefCell<MemoryStore>>>,
     working_dir: &str,
+    cap: usize,
 ) {
     let Some(handle) = memory_handle else { return };
-    let mems = handle
+    let all_mems = handle
         .borrow()
         .list_memories(working_dir)
         .unwrap_or_default();
+    let total = all_mems.len();
+    let mems: Vec<_> = all_mems.into_iter().take(cap).collect();
+    let truncated = total > mems.len();
+
     if !mems.is_empty() {
         let mut section = String::from("\n\n## Persistent memory (from past sessions)\n");
         for m in &mems {
@@ -251,6 +258,13 @@ fn wire_persistent_memory(
             };
             section.push_str(&format!("- [#{} {}] {}\n", m.id, scope, m.content));
         }
+        if truncated {
+            section.push_str(&format!(
+                "\n(Showing {} most-recently-updated memories of {}; older ones omitted from this session — use /memories to see them all.)\n",
+                mems.len(),
+                total,
+            ));
+        }
         section.push_str(
             "\nThese facts were saved by you (or the user) in past sessions and are still active. \
              Honour them unless explicitly contradicted in the current turn.\n",
@@ -258,10 +272,16 @@ fn wire_persistent_memory(
         if let Some(first) = agent.memory.first_mut() {
             first.content.push_str(&section);
         }
-        eprintln!(
-            "{}",
-            format!("Loaded {} persistent memories.", mems.len()).dimmed()
-        );
+        let label = if truncated {
+            format!(
+                "Loaded {} persistent memories ({} hidden).",
+                mems.len(),
+                total - mems.len()
+            )
+        } else {
+            format!("Loaded {} persistent memories.", mems.len())
+        };
+        eprintln!("{}", label.dimmed());
     }
     let writer = std::rc::Rc::clone(handle);
     let dir = working_dir.to_string();
@@ -402,6 +422,7 @@ fn run_chat(
             &mut agent,
             single_shot_memory.as_ref(),
             &single_shot_working_dir,
+            cfg.memory.max_inject_memories,
         );
 
         if cfg.llm.streaming {
@@ -484,7 +505,12 @@ fn run_chat(
     // any memories scoped to this working_dir into the agent's system
     // prompt and wires the on_remember callback.
     let memory_handle = open_memory_handle(&cfg);
-    wire_persistent_memory(&mut agent, memory_handle.as_ref(), &working_dir);
+    wire_persistent_memory(
+        &mut agent,
+        memory_handle.as_ref(),
+        &working_dir,
+        cfg.memory.max_inject_memories,
+    );
 
     // Determine which conversation to load
     let resume_id: Option<String> = if let Some(ref resume_arg) = resume {

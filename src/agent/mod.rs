@@ -3244,6 +3244,131 @@ mod tests {
     }
 
     #[test]
+    fn test_subagent_inherits_persistent_memory_from_parent_system_prompt() {
+        // The persistent memory section is appended to memory[0].content
+        // by main.rs. SubagentGuard clones memory[0] for the child's
+        // fresh memory, so any "## Persistent memory" section MUST be
+        // visible to the child loop in its first chat() call.
+        thread_local! {
+            static CHILD_SYSTEM: RefCell<Option<String>> = const { RefCell::new(None) };
+        }
+        struct CapturingLlm;
+        impl LlmProvider for CapturingLlm {
+            fn chat(
+                &self,
+                messages: &[Message],
+                _: &[ToolDefinition],
+            ) -> Result<LlmResponse, LlmError> {
+                if let Some(first) = messages.first() {
+                    CHILD_SYSTEM.with(|s| {
+                        if s.borrow().is_none() {
+                            *s.borrow_mut() = Some(first.content.clone());
+                        }
+                    });
+                }
+                Ok(LlmResponse {
+                    content: Some("done".to_string()),
+                    tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                })
+            }
+        }
+        CHILD_SYSTEM.with(|s| *s.borrow_mut() = None);
+
+        let mut agent = Agent::new(
+            Box::new(CapturingLlm),
+            default_registry(),
+            AgentConfig::default(),
+            &[],
+        );
+        // Simulate main.rs's memory injection: append a section to
+        // the parent's system prompt.
+        if let Some(first) = agent.memory.first_mut() {
+            first
+                .content
+                .push_str("\n\n## Persistent memory\n- uses pnpm not npm\n");
+        }
+        let _ = agent
+            .run_subagent("any", &mut |_| {}, &mut |_, _| true)
+            .unwrap();
+
+        let captured = CHILD_SYSTEM
+            .with(|s| s.borrow().clone())
+            .unwrap_or_default();
+        assert!(
+            captured.contains("## Persistent memory"),
+            "child system prompt missing memory section: {:?}",
+            captured
+        );
+        assert!(
+            captured.contains("uses pnpm not npm"),
+            "child system prompt missing memory body: {:?}",
+            captured
+        );
+    }
+
+    #[test]
+    fn test_subagent_remember_call_propagates_to_parent_callback() {
+        // The on_remember callback lives on the same Agent instance,
+        // and the subagent runs through that same Agent (memory swap,
+        // not fresh agent). So a `remember` tool call from the child
+        // must hit the parent-installed callback. Regression guard
+        // for any future refactor that scopes on_remember per-loop.
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let recorded: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let llm = MockLlm::new(vec![
+            // Parent emits a subagent call.
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "p1".to_string(),
+                    name: "subagent".to_string(),
+                    arguments: serde_json::json!({"task": "save a fact"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Child emits a remember call.
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "remember".to_string(),
+                    arguments: serde_json::json!({"content": "child-saved fact"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Child wraps up.
+            LlmResponse {
+                content: Some("noted".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // Parent wraps up.
+            LlmResponse {
+                content: Some("done".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let recorded_w = Rc::clone(&recorded);
+        agent.set_on_remember(Box::new(move |fact| {
+            recorded_w.borrow_mut().push(fact.to_string());
+            Ok(7)
+        }));
+
+        let _ = agent.process_message_with_callbacks("go", &mut |_| {}, &mut |_, _| true);
+
+        assert_eq!(
+            recorded.borrow().as_slice(),
+            &["child-saved fact".to_string()],
+            "child's remember() did not reach parent's on_remember callback"
+        );
+    }
+
+    #[test]
     fn test_subagent_hides_subagent_tool_from_child_loop() {
         // Hardening fix 1: child's chat_streaming() must NOT receive
         // the `subagent` tool definition. Otherwise the model wastes
