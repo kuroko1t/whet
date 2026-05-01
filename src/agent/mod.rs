@@ -58,8 +58,28 @@ impl SessionStats {
 }
 
 const MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
-const MAX_CONTEXT_MESSAGES: usize = 40;
+
+/// Compaction trigger: fires when the conversation memory is estimated
+/// to exceed this many tokens. Picked so a typical local model with
+/// `num_ctx = 8192` compacts at ~60 % utilisation — well before the
+/// "lost in the middle" decay zone (~80 % +) that hurts task quality.
+///
+/// Token count is approximated as `chars / 4`; we don't need the real
+/// BPE count to make a reasonable decision. The previous trigger
+/// (`message_count > 40`) failed for tool-heavy tasks where 13 LLM
+/// calls produced ~30 messages but ~6.7 K tokens of state — past the
+/// decay zone yet under the message threshold.
+pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: usize = 5000;
+
 const SUMMARIZE_KEEP_RECENT: usize = 10;
+
+/// Approximate token count of a slice of messages. Uses `chars / 4`,
+/// the standard rough proxy for English-heavy text on BPE tokenisers.
+/// Safe to over- or under-estimate by ~30 %; the trigger threshold has
+/// plenty of margin baked in.
+pub fn approx_token_count(messages: &[Message]) -> usize {
+    messages.iter().map(|m| m.content.chars().count() / 4).sum()
+}
 
 /// Tools that observe the workspace without modifying it. Used by the
 /// premature-exit detector: a turn that only invoked tools from this set
@@ -179,6 +199,10 @@ pub struct AgentConfig {
     pub permission_mode: PermissionMode,
     pub plan_mode: bool,
     pub context_compression: bool,
+    /// Token threshold above which the conversation is summarised down
+    /// to system prompt + last `SUMMARIZE_KEEP_RECENT` messages. Counted
+    /// via `approx_token_count`. Default: `DEFAULT_COMPACTION_TOKEN_THRESHOLD`.
+    pub compaction_token_threshold: usize,
     /// If set, structured per-event session stats are appended as JSON Lines.
     /// One object per tool call plus a final `session_end` summary line.
     pub stats_jsonl_path: Option<std::path::PathBuf>,
@@ -192,6 +216,7 @@ impl Default for AgentConfig {
             permission_mode: PermissionMode::Default,
             plan_mode: false,
             context_compression: true,
+            compaction_token_threshold: DEFAULT_COMPACTION_TOKEN_THRESHOLD,
             stats_jsonl_path: None,
         }
     }
@@ -292,9 +317,14 @@ impl Agent {
         self.process_message_with_callbacks(user_input, on_token, &mut |_, _| true)
     }
 
-    /// Compress context by summarizing old messages when the memory exceeds the threshold.
+    /// Compress context by summarising old messages when the memory's
+    /// approximate token count exceeds the configured threshold.
+    /// Token-based (not message-count): a tool-heavy task with 30
+    /// messages but 6 K tokens of file contents triggers compaction
+    /// before context decay sets in, while a 50-turn quick chat with
+    /// short replies stays uncompressed.
     fn compress_context(&mut self) {
-        if self.memory.len() <= MAX_CONTEXT_MESSAGES {
+        if approx_token_count(&self.memory) <= self.config.compaction_token_threshold {
             return;
         }
         self.compress_context_with_instruction(None);
@@ -3241,6 +3271,150 @@ mod tests {
             combined
         );
         assert_eq!(agent.stats.tool_calls_failed, 1);
+    }
+
+    // --- Context budget (token-based compaction trigger) ---
+
+    #[test]
+    fn test_approx_token_count_uses_chars_div_4() {
+        // Empirical sanity: chars/4 approximation. 100-char message → 25 tok.
+        let msgs = vec![
+            Message::system(&"a".repeat(100)),
+            Message::user(&"b".repeat(80)),
+        ];
+        assert_eq!(approx_token_count(&msgs), 100 / 4 + 80 / 4);
+    }
+
+    #[test]
+    fn test_compaction_does_not_fire_for_many_short_messages_below_token_threshold() {
+        // 50 short messages × ~10 chars each = ~500 chars = ~125 tokens.
+        // Under the 5000-token default threshold even though message
+        // count exceeds the *old* 40-message limit. Regression guard
+        // for the very gap that motivated the token-based switch:
+        // chatty conversations should NOT compact pointlessly.
+        //
+        // We exercise the trigger by handing the agent a final-text
+        // turn (no tool calls) and asserting it answered without the
+        // compaction-summary marker landing in memory[0].
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: Some("ok".to_string()),
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        }]);
+        let mut agent = make_agent(Box::new(llm));
+        // Pre-seed 50 short user/assistant turns.
+        for i in 0..25 {
+            agent.memory.push(Message::user(&format!("q{}", i)));
+            agent.memory.push(Message::assistant(&format!("a{}", i)));
+        }
+        let mem_len_before = agent.memory.len();
+        let _ = agent.process_message_with_callbacks("hi", &mut |_| {}, &mut |_, _| true);
+        // No compaction summary message inserted.
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !combined.contains("Previous conversation summary"),
+            "compaction fired but should not have on short-message conversation"
+        );
+        // Length should be mem_len_before + (user + assistant) = +2.
+        assert_eq!(agent.memory.len(), mem_len_before + 2);
+    }
+
+    #[test]
+    fn test_compaction_fires_when_token_count_exceeds_threshold() {
+        // Build a memory with a few messages whose combined content
+        // exceeds the threshold, simulating tool-heavy turns where a
+        // single read_file dumped a big file into memory. Old
+        // behaviour (`message_count > 40`) would not fire; new
+        // behaviour fires on token count.
+        //
+        // Use a small threshold to avoid wasting test cycles on the
+        // 5000-token default.
+        let llm = MockLlm::new(vec![
+            // Compaction summary call (no tools, just text).
+            LlmResponse {
+                content: Some("Summary: stuff happened".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // Real user-message call.
+            LlmResponse {
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig {
+                compaction_token_threshold: 100, // 100 tokens = ~400 chars
+                ..AgentConfig::default()
+            },
+            &[],
+        );
+        // 15 messages × 100 chars = 1500 chars = ~375 tokens, well over
+        // the 100-token threshold. The 15-message count also clears the
+        // `keep_from <= 1` early-return inside the compaction routine
+        // (which requires len > 1 + SUMMARIZE_KEEP_RECENT = 11).
+        for i in 0..15 {
+            agent
+                .memory
+                .push(Message::user(&format!("turn {}: {}", i, "x".repeat(95))));
+        }
+        let _ = agent.process_message_with_callbacks("hi", &mut |_| {}, &mut |_, _| true);
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("Previous conversation summary"),
+            "compaction did not fire even though token count exceeded threshold; memory: {:?}",
+            combined
+        );
+    }
+
+    #[test]
+    fn test_compaction_disabled_via_context_compression_flag() {
+        // Even when over the token threshold, compaction stays off
+        // when `context_compression` is false (config opt-out).
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: Some("ok".to_string()),
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        }]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(),
+            AgentConfig {
+                context_compression: false,
+                compaction_token_threshold: 100,
+                ..AgentConfig::default()
+            },
+            &[],
+        );
+        for i in 0..15 {
+            agent
+                .memory
+                .push(Message::user(&format!("turn {}: {}", i, "x".repeat(95))));
+        }
+        let _ = agent.process_message_with_callbacks("hi", &mut |_| {}, &mut |_, _| true);
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !combined.contains("Previous conversation summary"),
+            "compaction fired despite context_compression=false"
+        );
     }
 
     #[test]

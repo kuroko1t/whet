@@ -95,12 +95,22 @@ pub struct AgentConfig {
     pub web_enabled: bool,
     #[serde(default = "default_context_compression")]
     pub context_compression: bool,
+    /// Token threshold above which the conversation auto-compacts.
+    /// Default 5000 — compacts at ~60 % of a typical 8 K context window,
+    /// well before the "lost in the middle" decay zone hurts task
+    /// quality on small local models.
+    #[serde(default = "default_compaction_token_threshold")]
+    pub compaction_token_threshold: usize,
     #[serde(default = "default_skills_dir")]
     pub skills_dir: String,
 }
 
 fn default_context_compression() -> bool {
     true
+}
+
+fn default_compaction_token_threshold() -> usize {
+    5000
 }
 
 fn default_skills_dir() -> String {
@@ -153,6 +163,7 @@ impl Default for Config {
                 permission_mode: PermissionMode::Default,
                 web_enabled: false,
                 context_compression: true,
+                compaction_token_threshold: default_compaction_token_threshold(),
                 skills_dir: "~/.whet/skills".to_string(),
             },
             memory: MemoryConfig {
