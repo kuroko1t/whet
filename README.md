@@ -102,6 +102,31 @@ whet   # in a project with WHET.md → instructions are loaded automatically
 
 Use `/init` to generate a starter template.
 
+### Plan-First on Open-Ended Questions
+
+Concrete directives are acted on immediately. Open-ended questions get a short option list with tradeoffs and a recommendation, *and no edits*, until you pick.
+
+```
+you> What should we do next?
+
+Three options:
+  A. Hooks — extensible but adds a config surface
+  B. Parallel subagent — better latency, more memory pressure
+  C. Devstral verification — confirms the current behavior, no new code
+
+Recommendation: B. The latency win directly addresses the recent complaint.
+Which would you like?
+```
+
+```
+you> Edit main.rs to print "hello"
+
+  Read(src/main.rs)
+  Edit(src/main.rs)
+```
+
+Detection is heuristic-based on the user's input ("what should we…", "どっちがいい？", "X or Y?", …) so the harness's act-don't-ask re-prompt stays out of the way only when you actually asked a strategic question. Vague directives ("something feels slow") are still treated as directives — Whet investigates instead of asking back.
+
 ### 12 Built-in Tools
 
 | Tool | Category | Description |
@@ -331,6 +356,7 @@ whet config                      # show current configuration
 | Subagents (isolated context) | Sequential, model- and `/agent`-callable | Yes (parallel) |
 | Diagnostics | `/doctor` (ollama / model / config / MCP) | `/doctor` |
 | Diff preview after edits | Yes (red `-` / green `+`, TTY-gated) | Yes |
+| Plan-first on open-ended questions | Yes (auto-detected, EN + JA) | Yes |
 
 ## Benchmark Results
 
