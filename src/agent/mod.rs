@@ -81,6 +81,36 @@ pub fn approx_token_count(messages: &[Message]) -> usize {
     messages.iter().map(|m| m.content.chars().count() / 4).sum()
 }
 
+/// Approximate token count of what the LLM provider will actually see:
+/// messages PLUS tool definitions. The tool definitions are passed
+/// alongside `messages` to `chat()` and count toward Ollama's
+/// `prompt_tokens` — without including them, a 12-tool registry
+/// (~2 K tokens of description + schema) is invisible to the
+/// compaction trigger and we'd never compact when the per-call
+/// budget actually exceeds the threshold.
+///
+/// Each `ToolDefinition` is approximated as
+/// `name + description + parameters_json + per-tool framing slack`,
+/// `/ 4`. Slack accounts for JSON wrapping and field-name overhead
+/// that real BPE tokenisers don't compress as tightly as natural text.
+pub fn approx_token_count_with_tools(
+    messages: &[Message],
+    tools: &[crate::llm::ToolDefinition],
+) -> usize {
+    const PER_TOOL_FRAMING_CHARS: usize = 40;
+    let msg_tokens = approx_token_count(messages);
+    let tool_chars: usize = tools
+        .iter()
+        .map(|t| {
+            t.name.len()
+                + t.description.len()
+                + t.parameters.to_string().len()
+                + PER_TOOL_FRAMING_CHARS
+        })
+        .sum();
+    msg_tokens + tool_chars / 4
+}
+
 /// Tools that observe the workspace without modifying it. Used by the
 /// premature-exit detector: a turn that only invoked tools from this set
 /// hasn't actually acted on the user's request yet.
@@ -328,15 +358,19 @@ impl Agent {
     /// (e.g. only 2-3 messages but one is a 30 KB tool-result paste),
     /// a fallback per-message head+tail truncation kicks in so a
     /// single oversized message can't keep memory in the decay zone.
-    fn compress_context(&mut self) {
-        if approx_token_count(&self.memory) <= self.config.compaction_token_threshold {
+    fn compress_context(&mut self, tool_defs: &[crate::llm::ToolDefinition]) {
+        if approx_token_count_with_tools(&self.memory, tool_defs)
+            <= self.config.compaction_token_threshold
+        {
             return;
         }
         self.compress_context_with_instruction(None);
         // Summarisation may have been a no-op (history too short to
         // have anything to summarise). If we're still over budget,
         // shrink any individual oversized middle message in place.
-        if approx_token_count(&self.memory) > self.config.compaction_token_threshold {
+        if approx_token_count_with_tools(&self.memory, tool_defs)
+            > self.config.compaction_token_threshold
+        {
             self.truncate_oversized_messages();
         }
     }
@@ -480,15 +514,18 @@ impl Agent {
     ) -> (String, ExitReason) {
         self.memory.push(Message::user(user_input));
 
-        // Compress context if enabled and threshold exceeded
-        if self.config.context_compression {
-            self.compress_context();
-        }
-
         // Own the tool definitions for this turn so we can call &mut self
         // methods (e.g. run_subagent) inside the loop without conflicting
         // with a borrow on self.tools. Clone is shallow — definitions are
         // small structs, one allocation per turn.
+        //
+        // We materialise these BEFORE the compaction check so the
+        // compaction threshold can account for tool-definition size
+        // (~2 K tokens for whet's 12-tool registry). Without it, a
+        // typical bench prompt of 4-5 K total tokens reads as only
+        // 2-3 K of "messages" by `approx_token_count` and never
+        // breaches the threshold even though the model is past the
+        // decay zone.
         let mut tool_defs: Vec<crate::llm::ToolDefinition> = if self.config.plan_mode {
             self.tools.safe_definitions().to_vec()
         } else {
@@ -500,6 +537,13 @@ impl Agent {
         // model emitting calls that always error out.
         if self.subagent_depth > 0 {
             tool_defs.retain(|d| d.name != "subagent");
+        }
+
+        // Compress context if enabled and threshold exceeded. Counts
+        // both messages AND tool definitions (the LLM provider sees
+        // both as part of `prompt_tokens`).
+        if self.config.context_compression {
+            self.compress_context(&tool_defs);
         }
 
         let mut reprompt_count: usize = 0;
@@ -3467,6 +3511,92 @@ mod tests {
         assert!(
             !combined.contains("Previous conversation summary"),
             "compaction fired despite context_compression=false"
+        );
+    }
+
+    #[test]
+    fn test_approx_token_count_with_tools_includes_tool_def_size() {
+        // The trigger must account for tool definitions because the
+        // LLM provider counts them toward prompt_tokens. A real
+        // 12-tool registry adds ~2 K tokens; without including it,
+        // the threshold is silently 2 K too high in practice.
+        let msgs = vec![Message::user("hi")];
+        let bare = approx_token_count(&msgs);
+        let with_tools = approx_token_count_with_tools(
+            &msgs,
+            &[
+                crate::llm::ToolDefinition {
+                    name: "read_file".to_string(),
+                    description: "Read a file".to_string(),
+                    parameters: serde_json::json!({"type":"object"}),
+                },
+                crate::llm::ToolDefinition {
+                    name: "write_file".to_string(),
+                    description: "Write a file".to_string(),
+                    parameters: serde_json::json!({"type":"object"}),
+                },
+            ],
+        );
+        assert!(
+            with_tools > bare,
+            "tools-aware count {} should exceed bare {} when tools provided",
+            with_tools,
+            bare
+        );
+    }
+
+    #[test]
+    fn test_compaction_fires_when_messages_plus_tools_exceed_threshold() {
+        // Edge case: messages alone are under the threshold, but
+        // adding the tool definitions pushes total over. Compaction
+        // MUST fire — this is the bug we just fixed where the bench
+        // never compacted because tool_defs (~2 K tokens) weren't
+        // counted.
+        let llm = MockLlm::new(vec![
+            // Compaction summary call.
+            LlmResponse {
+                content: Some("summary".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // Real response.
+            LlmResponse {
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = Agent::new(
+            Box::new(llm),
+            default_registry(), // 11 tools = ~2 K tokens of definitions
+            AgentConfig {
+                // Threshold 600 — easily breached when tool defs
+                // account for ~500 tokens by themselves.
+                compaction_token_threshold: 600,
+                ..AgentConfig::default()
+            },
+            &[],
+        );
+        // 12 short messages × 50 chars = 600 chars = 150 tokens.
+        // The 11-tool registry adds ~500 tokens. Total > 600 threshold.
+        for i in 0..12 {
+            agent.memory.push(Message::user(&format!(
+                "turn {} short {}",
+                i,
+                "x".repeat(40)
+            )));
+        }
+        let _ = agent.process_message_with_callbacks("trigger", &mut |_| {}, &mut |_, _| true);
+        let combined: String = agent
+            .memory
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("Previous conversation summary"),
+            "compaction did not fire even though messages + tools exceed threshold; memory: {:?}",
+            combined.chars().take(300).collect::<String>()
         );
     }
 
