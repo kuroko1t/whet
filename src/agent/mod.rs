@@ -1006,7 +1006,13 @@ fn user_input_is_open_ended(input: &str) -> bool {
         return false;
     }
     // English patterns that ask for the model's opinion / options
-    // rather than for it to take a specific action.
+    // rather than for it to take a specific action. Patterns are kept
+    // narrow on purpose — false positives here disable the act-don't-
+    // ask re-prompt for directive prompts, which can let a borderline
+    // task fail when the model bails with a clarifying question. Bare
+    // disjunctions ("X or Y", "X vs Y") are intentionally NOT included
+    // because they match prose ("e.g. GET /users or POST /memos",
+    // "do not modify package.json or tsconfig.json").
     let patterns_en = [
         "what should we",
         "what should i",
@@ -1024,8 +1030,6 @@ fn user_input_is_open_ended(input: &str) -> bool {
         "any ideas",
         "should we ",
         "or should we",
-        " or ", // "X or Y?" disjunction
-        " vs ",
         "what's the best",
         "what is the best",
     ];
@@ -3143,6 +3147,27 @@ mod tests {
         assert!(!user_input_is_open_ended("Run cargo build"));
         assert!(!user_input_is_open_ended("Refactor login.py"));
         assert!(!user_input_is_open_ended(""));
+    }
+
+    #[test]
+    fn test_user_input_is_open_ended_rejects_prose_disjunctions() {
+        // Regression guard: task prompts like task8_cli_filter contain
+        // bare " or " in prose ("must not be removed or weakened"); an
+        // earlier version of the heuristic matched these and disabled
+        // the act-don't-ask re-prompt for directive prompts, regressing
+        // a borderline bench task. The heuristic must NOT fire on these.
+        assert!(!user_input_is_open_ended(
+            "Add a `--status` filter so the four existing tests must not be removed or weakened."
+        ));
+        assert!(!user_input_is_open_ended(
+            "Migrate every print() to logging — INFO or DEBUG for routine status."
+        ));
+        assert!(!user_input_is_open_ended(
+            "Do not modify package.json or tsconfig.json."
+        ));
+        assert!(!user_input_is_open_ended(
+            "Verify with `npx tsc --noEmit` or `npx tsx --test src/calc.test.ts`."
+        ));
     }
 
     #[test]
