@@ -295,6 +295,7 @@ mod tests {
                 permission_mode: PermissionMode::Default,
                 context_compression: true,
                 compaction_token_threshold: 5000,
+                compaction_token_threshold_ratio: 0.6,
                 skills_dir: "~/.whet/skills".to_string(),
                 web_enabled: false,
             },

@@ -211,11 +211,36 @@ fn setup_agent(cfg: &Config, model: &str, skills: &[Skill], yolo: bool) -> Agent
         permission_mode,
         plan_mode: false,
         context_compression: cfg.agent.context_compression,
-        compaction_token_threshold: cfg.agent.compaction_token_threshold,
+        compaction_token_threshold: resolve_compaction_threshold(cfg),
         stats_jsonl_path: std::env::var_os("WHET_STATS_JSONL").map(std::path::PathBuf::from),
     };
 
     Agent::new(provider, registry, agent_config, skills)
+}
+
+/// Pick the actual compaction-trigger token count, scaling with the
+/// model's context window when possible. Precedence:
+///   1. Ratio mode (the default): if `compaction_token_threshold_ratio
+///      > 0` AND `[llm.options].num_ctx` is set, use `num_ctx × ratio`.
+///   2. Absolute fallback: otherwise use `compaction_token_threshold`.
+///
+/// Rationale: a single global threshold is either too eager on large-
+/// context models (compacts at 2 % of a 200 K window) or too lax on
+/// small ones (never fires before overflow on a 4 K window). The
+/// ratio-based resolution adapts to whatever model the user runs at
+/// invocation time, while the absolute knob remains for users who
+/// want a deterministic value regardless of provider/model.
+fn resolve_compaction_threshold(cfg: &Config) -> usize {
+    if cfg.agent.compaction_token_threshold_ratio > 0.0 {
+        if let Some(num_ctx) = cfg.llm.options.num_ctx {
+            // Ratio mode. Cast through f32 to apply the fraction;
+            // ratio sanity-clamped on the high end so a typo of 6.0
+            // (instead of 0.6) doesn't produce an absurd threshold.
+            let ratio = cfg.agent.compaction_token_threshold_ratio.clamp(0.0, 0.95);
+            return ((num_ctx as f32) * ratio) as usize;
+        }
+    }
+    cfg.agent.compaction_token_threshold
 }
 
 /// Open (or reopen) the persistent-memory SQLite handle. Used for the
@@ -1330,5 +1355,99 @@ fn main() {
             });
             run_chat(cli.model, cli.resume, cli.continue_conv, message, cli.yolo);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        AgentConfig as CfgAgent, LlmConfig, LlmOptions, McpConfig, MemoryConfig, PermissionMode,
+    };
+
+    fn make_cfg(num_ctx: Option<u32>, ratio: f32, abs: usize) -> Config {
+        let options = LlmOptions {
+            num_ctx,
+            ..LlmOptions::default()
+        };
+        Config {
+            llm: LlmConfig {
+                provider: "ollama".to_string(),
+                model: "qwen3.5:9b".to_string(),
+                base_url: "http://localhost:11434".to_string(),
+                api_key: None,
+                streaming: false,
+                options,
+            },
+            agent: CfgAgent {
+                max_iterations: 10,
+                permission_mode: PermissionMode::Default,
+                web_enabled: false,
+                context_compression: true,
+                compaction_token_threshold: abs,
+                compaction_token_threshold_ratio: ratio,
+                skills_dir: "~/.whet/skills".to_string(),
+            },
+            memory: MemoryConfig {
+                database_path: ":memory:".to_string(),
+                max_inject_memories: 50,
+            },
+            mcp: McpConfig::default(),
+        }
+    }
+
+    #[test]
+    fn resolve_threshold_uses_ratio_when_num_ctx_set() {
+        // 8192 × 0.6 = 4915 (truncated by f32 cast).
+        let cfg = make_cfg(Some(8192), 0.6, 5000);
+        assert_eq!(resolve_compaction_threshold(&cfg), 4915);
+    }
+
+    #[test]
+    fn resolve_threshold_scales_with_larger_context() {
+        // 32768 × 0.6 = 19660. Big-context models compact later, as
+        // they should.
+        let cfg = make_cfg(Some(32768), 0.6, 5000);
+        assert_eq!(resolve_compaction_threshold(&cfg), 19660);
+    }
+
+    #[test]
+    fn resolve_threshold_scales_with_smaller_context() {
+        // 4096 × 0.6 = 2457. Small-context models compact earlier,
+        // before overflow.
+        let cfg = make_cfg(Some(4096), 0.6, 5000);
+        assert_eq!(resolve_compaction_threshold(&cfg), 2457);
+    }
+
+    #[test]
+    fn resolve_threshold_falls_back_to_absolute_when_num_ctx_unset() {
+        // Cloud providers (Anthropic, Gemini) don't set num_ctx in
+        // [llm.options]. Fallback to the explicit absolute keeps a
+        // sensible default.
+        let cfg = make_cfg(None, 0.6, 5000);
+        assert_eq!(resolve_compaction_threshold(&cfg), 5000);
+    }
+
+    #[test]
+    fn resolve_threshold_uses_absolute_when_ratio_is_zero() {
+        // Explicit opt-out of ratio mode: ratio = 0 means "use my
+        // exact number regardless of num_ctx".
+        let cfg = make_cfg(Some(8192), 0.0, 7777);
+        assert_eq!(resolve_compaction_threshold(&cfg), 7777);
+    }
+
+    #[test]
+    fn resolve_threshold_clamps_runaway_ratio() {
+        // Defensive: a typo of 6.0 (meant 0.6) is clamped to 0.95 so
+        // we never produce a threshold that exceeds num_ctx itself.
+        // 8192 × 0.95 = 7782.
+        let cfg = make_cfg(Some(8192), 6.0, 5000);
+        let resolved = resolve_compaction_threshold(&cfg);
+        assert!(
+            resolved < 8192,
+            "threshold {} must stay below num_ctx",
+            resolved
+        );
+        assert_eq!(resolved, 7782);
     }
 }
