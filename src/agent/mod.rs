@@ -542,6 +542,18 @@ impl Agent {
         // Compress context if enabled and threshold exceeded. Counts
         // both messages AND tool definitions (the LLM provider sees
         // both as part of `prompt_tokens`).
+        //
+        // Deliberately checked ONLY at process_message entry, not on
+        // every loop iteration. Per-iteration compaction was tried
+        // and found to hurt: in batch-tool turns where the model
+        // returns 15 read_file calls in one response, the resulting
+        // ~10 KB of tool_results land in memory all at once, the
+        // next iteration's LLM call sees memory > threshold,
+        // compaction fires and summarises away the very file
+        // contents the model still needs to integrate. Single-shot
+        // tasks pass without compaction because num_ctx (8 K) holds
+        // them fine; long multi-turn conversations get compacted at
+        // each new user input, which is the point.
         if self.config.context_compression {
             self.compress_context(&tool_defs);
         }

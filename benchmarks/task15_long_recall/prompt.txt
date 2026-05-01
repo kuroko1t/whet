@@ -1,0 +1,12 @@
+This directory contains 15 fact files, named `fact_01.txt` through `fact_15.txt`. Each file contains a UNIQUE secret keyword on a line that says "The secret keyword is: KEYWORD". The keywords cannot be guessed; you must read each file to learn them.
+
+Read every file from `fact_01.txt` through `fact_15.txt` in order, then create a file named `ANSWER.md` in the workspace root with one line per fact in the form:
+
+    1: KEYWORD_FOR_FACT_01
+    2: KEYWORD_FOR_FACT_02
+    ...
+    15: KEYWORD_FOR_FACT_15
+
+Use the EXACT keyword from each file (uppercase, with the trailing number — e.g. `ZORTHAXIPLE_01`). Do not paraphrase. The order must be 1-15.
+
+Do not modify any source file. Only create `ANSWER.md`.

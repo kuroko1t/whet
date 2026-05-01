@@ -1,0 +1,15 @@
+This is fact file number 1. The information stored here is independent
+of every other fact file in this directory; you cannot infer it from
+context, you must read this file in full.
+
+The secret keyword is: ZORTHAXIPLE_01
+
+To verify you have read this file completely, you should report this
+exact keyword (uppercase, with the trailing number) and not paraphrase
+or guess. The fact files are deliberately full of filler so that the
+LLM context window will be tested when reading all 15 of them in
+sequence — this is the whole point of the benchmark.
+
+Filler line 1: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+Filler line 2: sed do eiusmod tempor incididunt ut labore et dolore magna.
+Filler line 3: ut enim ad minim veniam, quis nostrud exercitation ullamco.
