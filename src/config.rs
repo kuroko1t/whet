@@ -95,12 +95,24 @@ pub struct AgentConfig {
     pub web_enabled: bool,
     #[serde(default = "default_context_compression")]
     pub context_compression: bool,
-    /// Token threshold above which the conversation auto-compacts.
-    /// Default 5000 — compacts at ~60 % of a typical 8 K context window,
-    /// well before the "lost in the middle" decay zone hurts task
-    /// quality on small local models.
+    /// Absolute fallback token threshold for compaction. Used when
+    /// `compaction_token_threshold_ratio` is 0 (explicit opt-out) or
+    /// when `num_ctx` is not set (cloud providers without a
+    /// model-specific context-window declaration). Default 5000.
     #[serde(default = "default_compaction_token_threshold")]
     pub compaction_token_threshold: usize,
+    /// Compaction trigger as a fraction of `[llm.options].num_ctx`.
+    /// Default 0.6 — compacts at ~60 % of the model's actual context
+    /// window, well before the "lost in the middle" decay zone. Set
+    /// to 0 to disable ratio-based auto-scaling and use the absolute
+    /// `compaction_token_threshold` instead.
+    ///
+    /// This makes the threshold model-aware: a 4 K-context model
+    /// compacts at ~2 K, an 8 K model at ~5 K, a 32 K model at ~19 K.
+    /// Without it, a single global threshold is either too eager on
+    /// large-context models or too lax on small ones.
+    #[serde(default = "default_compaction_token_threshold_ratio")]
+    pub compaction_token_threshold_ratio: f32,
     #[serde(default = "default_skills_dir")]
     pub skills_dir: String,
 }
@@ -111,6 +123,10 @@ fn default_context_compression() -> bool {
 
 fn default_compaction_token_threshold() -> usize {
     5000
+}
+
+fn default_compaction_token_threshold_ratio() -> f32 {
+    0.6
 }
 
 fn default_skills_dir() -> String {
@@ -164,6 +180,7 @@ impl Default for Config {
                 web_enabled: false,
                 context_compression: true,
                 compaction_token_threshold: default_compaction_token_threshold(),
+                compaction_token_threshold_ratio: default_compaction_token_threshold_ratio(),
                 skills_dir: "~/.whet/skills".to_string(),
             },
             memory: MemoryConfig {
