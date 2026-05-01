@@ -319,35 +319,45 @@ fn wire_persistent_memory(
     }));
 }
 
-/// Single-shot helper: if `resume_arg` or `continue_conv` is set,
-/// load the matching past conversation's messages into
-/// `agent.memory` so the next `process_message_with_callbacks` call
-/// has full context. Quiet (no "you>"/"bot>" replay output) — the
-/// REPL path has its own richer presentation; single-shot users just
-/// want their question answered.
-fn load_resumed_history_into_agent(
-    agent: &mut Agent,
+/// Resolve the conversation id to load on a single-shot invocation.
+///
+/// Returns `Some(id)` when:
+///
+///   - `-r <id>` was given with a non-empty id, OR
+///   - `-c` was given AND a past conversation exists for `working_dir`.
+///
+/// Returns `None` when no resume was requested or no past conversation
+/// matches; the caller should then create a fresh conversation.
+fn resolve_single_shot_resume_id(
     memory_handle: Option<&std::rc::Rc<std::cell::RefCell<MemoryStore>>>,
     working_dir: &str,
     resume_arg: Option<&str>,
     continue_conv: bool,
-) {
-    let Some(handle) = memory_handle else { return };
-    let store = handle.borrow();
-
-    let resume_id: Option<String> = match resume_arg {
+) -> Option<String> {
+    match resume_arg {
         Some(id) if !id.is_empty() => Some(id.to_string()),
-        Some(_) => {
-            // Empty `--resume` (no id, no picker possible in single-
-            // shot since it's not interactive). Fall through to None.
-            None
-        }
-        None if continue_conv => store.get_latest_conversation_id(working_dir).ok().flatten(),
+        Some(_) => None, // empty --resume: picker not available in single-shot
+        None if continue_conv => memory_handle.and_then(|h| {
+            h.borrow()
+                .get_latest_conversation_id(working_dir)
+                .ok()
+                .flatten()
+        }),
         None => None,
-    };
+    }
+}
 
-    let Some(id) = resume_id else { return };
-    let Ok(messages) = store.load_messages(&id) else {
+/// Load `id`'s messages into `agent.memory` from the store. No-op if
+/// `id` is None or the conversation has no messages. Quiet (no
+/// "you>"/"bot>" replay) — the REPL path has its own richer presentation.
+fn load_resumed_history_into_agent_by_id(
+    agent: &mut Agent,
+    memory_handle: Option<&std::rc::Rc<std::cell::RefCell<MemoryStore>>>,
+    id: Option<&str>,
+) {
+    let Some(id) = id else { return };
+    let Some(handle) = memory_handle else { return };
+    let Ok(messages) = handle.borrow().load_messages(id) else {
         return;
     };
     if messages.is_empty() {
@@ -532,13 +542,35 @@ fn run_chat(
         // conversation into agent.memory before processing the new
         // user message, so `whet -c -p "summarise"` actually summarises
         // the previous session instead of starting fresh.
-        load_resumed_history_into_agent(
-            &mut agent,
+        let resumed_id = resolve_single_shot_resume_id(
             single_shot_memory.as_ref(),
             &single_shot_working_dir,
             resume.as_deref(),
             continue_conv,
         );
+        load_resumed_history_into_agent_by_id(
+            &mut agent,
+            single_shot_memory.as_ref(),
+            resumed_id.as_deref(),
+        );
+
+        // Establish the conversation_id and create the row if new.
+        // Without this, `whet -p "..."` invocations don't persist
+        // their messages to SQLite, so a subsequent `whet -c -p`
+        // can't find them — making `-c` a no-op in single-shot.
+        let conversation_id = match resumed_id {
+            Some(id) => id,
+            None => {
+                let new_id = uuid::Uuid::new_v4().to_string();
+                if let Some(handle) = single_shot_memory.as_ref() {
+                    let _ = handle
+                        .borrow()
+                        .create_conversation(&new_id, &single_shot_working_dir);
+                }
+                new_id
+            }
+        };
+        let memory_before = agent.memory.len();
 
         if cfg.llm.streaming {
             let mut spinner = Some(agent::display::Spinner::start());
@@ -560,6 +592,26 @@ fn run_chat(
             let response =
                 agent.process_message_with_callbacks(&msg, &mut |_| {}, &mut |_, _| yolo);
             println!("{}", response);
+        }
+        // Persist the new turn (user input + assistant response + any
+        // tool messages) so the next `whet -c -p ...` can resume.
+        if let Some(handle) = single_shot_memory.as_ref() {
+            let store = handle.borrow();
+            for msg in &agent.memory[memory_before..] {
+                let role = msg.role.to_string();
+                let tc_json = if msg.tool_calls.is_empty() {
+                    None
+                } else {
+                    serde_json::to_string(&msg.tool_calls).ok()
+                };
+                let _ = store.save_message(
+                    &conversation_id,
+                    &role,
+                    &msg.content,
+                    msg.tool_call_id.as_deref(),
+                    tc_json.as_deref(),
+                );
+            }
         }
         print_session_stats(&agent.stats);
         return;

@@ -102,15 +102,21 @@ pub struct AgentConfig {
     #[serde(default = "default_compaction_token_threshold")]
     pub compaction_token_threshold: usize,
     /// Compaction trigger as a fraction of `[llm.options].num_ctx`.
-    /// Default 0.6 — compacts at ~60 % of the model's actual context
-    /// window, well before the "lost in the middle" decay zone. Set
-    /// to 0 to disable ratio-based auto-scaling and use the absolute
-    /// `compaction_token_threshold` instead.
+    /// Default 0.85 — compacts only when the prompt is about to
+    /// overflow num_ctx, leaving 15 % headroom for the compaction
+    /// LLM call's own prompt. Set to 0 to disable ratio-based
+    /// auto-scaling and use the absolute `compaction_token_threshold`.
     ///
-    /// This makes the threshold model-aware: a 4 K-context model
-    /// compacts at ~2 K, an 8 K model at ~5 K, a 32 K model at ~19 K.
-    /// Without it, a single global threshold is either too eager on
-    /// large-context models or too lax on small ones.
+    /// Tuned empirically: 0.6 was tried and proved too aggressive —
+    /// it fired on conversations that fit cleanly inside num_ctx,
+    /// summarising away detail that the model still needed. 0.85
+    /// fires only when Ollama would otherwise silently truncate the
+    /// oldest tokens, which is exactly when summarisation outperforms
+    /// blunt FIFO truncation. See
+    /// `.dev/scripts/test_compaction_preseed_recall.sh` for the
+    /// 30-turn / num_ctx=4096 A/B that empirically showed compaction
+    /// recovers 14/15 early-conversation keywords vs Ollama's 0/15
+    /// after silent truncation.
     #[serde(default = "default_compaction_token_threshold_ratio")]
     pub compaction_token_threshold_ratio: f32,
     #[serde(default = "default_skills_dir")]
@@ -126,7 +132,7 @@ fn default_compaction_token_threshold() -> usize {
 }
 
 fn default_compaction_token_threshold_ratio() -> f32 {
-    0.6
+    0.85
 }
 
 fn default_skills_dir() -> String {
