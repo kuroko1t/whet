@@ -558,6 +558,14 @@ impl Agent {
             self.compress_context(&tool_defs);
         }
 
+        // When the user's input is itself an open-ended question (asking
+        // for options/recommendations rather than commanding an action),
+        // we want the model to be ALLOWED to reply with options + a
+        // trailing clarifying question — without whet's question-
+        // detection re-prompt firing. Computed once per process_message
+        // so the per-iteration loop below can short-circuit.
+        let user_asked_open_ended = user_input_is_open_ended(user_input);
+
         let mut reprompt_count: usize = 0;
         const MAX_REPROMPTS: usize = 1;
         // Per-turn tool tracking. The premature-exit detector fires only when
@@ -623,8 +631,15 @@ impl Agent {
                     self.stats.text_to_tool_fallbacks += 1;
                     effective_tool_calls = extracted;
                 }
-                // Pattern 1: Re-prompt if model asked a question instead of acting
-                else if reprompt_count < MAX_REPROMPTS && looks_like_question(&content) {
+                // Pattern 1: Re-prompt if model asked a question instead of acting.
+                // Skipped when the user's input itself was open-ended — in that
+                // case the model SHOULD reply with options + a trailing question,
+                // and chastising it for asking back would defeat the
+                // "OPEN-ENDED QUESTIONS" prompt rule.
+                else if reprompt_count < MAX_REPROMPTS
+                    && !user_asked_open_ended
+                    && looks_like_question(&content)
+                {
                     eprintln!(
                         "  {}",
                         "[re-prompt: model asked instead of acting]".yellow()
@@ -976,6 +991,74 @@ impl Agent {
 }
 
 /// Check if text content looks like the model is asking a question instead of acting.
+/// True when the user's input is itself an open-ended question
+/// inviting discussion (e.g. "what should we do next?", "which approach
+/// is better?"). When this fires, the model is *supposed* to respond
+/// with options + tradeoffs and end with a clarifying question — so
+/// the question-detection re-prompt heuristic should NOT chastise the
+/// model for asking back. Gates `looks_like_question` re-prompts so
+/// the new "OPEN-ENDED QUESTIONS" prompt section actually works in
+/// practice on instruction-tuned models that defer to whet's harness
+/// re-prompts.
+fn user_input_is_open_ended(input: &str) -> bool {
+    let lower = input.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    // English patterns that ask for the model's opinion / options
+    // rather than for it to take a specific action.
+    let patterns_en = [
+        "what should we",
+        "what should i",
+        "how should we",
+        "how should i",
+        "which approach",
+        "which option",
+        "which would you",
+        "what are the options",
+        "what do you think",
+        "what do you recommend",
+        "what would you recommend",
+        "any recommendations",
+        "any thoughts",
+        "any ideas",
+        "should we ",
+        "or should we",
+        " or ", // "X or Y?" disjunction
+        " vs ",
+        "what's the best",
+        "what is the best",
+    ];
+    if patterns_en.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    // Japanese — common phrasings the user actually types.
+    let patterns_ja = [
+        "次は何",
+        "次のステップ",
+        "次やる",
+        "次やり",
+        "どう思",
+        "どっち",
+        "どれが",
+        "どうする",
+        "どうしよう",
+        "案を",
+        "案は",
+        "選択肢",
+        "おすすめ",
+        "推奨",
+        "比較",
+        "どちらが",
+        "どれを",
+        "必要？",
+        "必要か",
+        "やるべき",
+        "やるべきか",
+    ];
+    patterns_ja.iter().any(|p| lower.contains(p))
+}
+
 fn looks_like_question(content: &str) -> bool {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -3020,6 +3103,111 @@ mod tests {
 
         let result = try_extract_tool_calls_from_text("just plain text", &tools);
         assert!(result.is_empty());
+    }
+
+    // --- Open-ended user input detection ---
+
+    #[test]
+    fn test_user_input_is_open_ended_recognises_english_patterns() {
+        assert!(user_input_is_open_ended(
+            "What should we do next about this project?"
+        ));
+        assert!(user_input_is_open_ended(
+            "Which approach is better, A or B?"
+        ));
+        assert!(user_input_is_open_ended(
+            "What do you think about adding hooks?"
+        ));
+        assert!(user_input_is_open_ended("Any thoughts on the design?"));
+        assert!(user_input_is_open_ended(
+            "What are the options for parallel subagent?"
+        ));
+    }
+
+    #[test]
+    fn test_user_input_is_open_ended_recognises_japanese_patterns() {
+        assert!(user_input_is_open_ended("次は何やる？"));
+        assert!(user_input_is_open_ended("どっちがいい？"));
+        assert!(user_input_is_open_ended("Hooks は必要？それとも不要？"));
+        assert!(user_input_is_open_ended("おすすめは？"));
+        assert!(user_input_is_open_ended("案をいくつか出して"));
+    }
+
+    #[test]
+    fn test_user_input_is_open_ended_rejects_concrete_directives() {
+        assert!(!user_input_is_open_ended("Fix the bug in src/main.rs"));
+        assert!(!user_input_is_open_ended(
+            "Read this file and tell me the keyword"
+        ));
+        assert!(!user_input_is_open_ended("Add a test for foo()"));
+        assert!(!user_input_is_open_ended("Run cargo build"));
+        assert!(!user_input_is_open_ended("Refactor login.py"));
+        assert!(!user_input_is_open_ended(""));
+    }
+
+    #[test]
+    fn test_question_reprompt_skipped_when_user_asked_open_ended() {
+        // Setup: user input is open-ended ("What should we do?"). The
+        // model replies with options + a trailing question. Without the
+        // gate, our existing question-detection heuristic would chastise
+        // the model. With the gate, the response stands as the final
+        // answer (no re-prompt, reprompts counter stays 0).
+        let llm = MockLlm::new(vec![LlmResponse {
+            content: Some(
+                "Here are 3 options:\n\
+                 A. Hooks\nB. Parallel subagent\nC. devstral verify\n\
+                 Which would you prefer?"
+                    .to_string(),
+            ),
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        }]);
+        let mut agent = make_agent(Box::new(llm));
+        let response = agent.process_message_with_callbacks(
+            "What should we do next?",
+            &mut |_| {},
+            &mut |_, _| true,
+        );
+        assert!(
+            response.contains("Which would you prefer"),
+            "open-ended response should pass through, got: {:?}",
+            response
+        );
+        assert_eq!(
+            agent.stats.reprompts, 0,
+            "no re-prompt should fire when user asked open-ended"
+        );
+    }
+
+    #[test]
+    fn test_question_reprompt_still_fires_for_directive_inputs() {
+        // Setup: user input is a directive ("Fix the bug"). The model
+        // bails with a question instead. Existing re-prompt SHOULD
+        // fire to push the model into action — the new gate must not
+        // accidentally disable this protection for non-open-ended
+        // inputs.
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: Some("Which file has the bug?".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("OK I'll explore.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let _ = agent.process_message_with_callbacks(
+            "Fix the bug in main.rs",
+            &mut |_| {},
+            &mut |_, _| true,
+        );
+        assert_eq!(
+            agent.stats.reprompts, 1,
+            "directive input should still trigger the act-don't-ask re-prompt"
+        );
     }
 
     // --- Subagent (Phase A: /agent slash, sequential, isolated memory) ---
