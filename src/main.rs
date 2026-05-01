@@ -586,37 +586,51 @@ fn run_chat(
                 let memory_before = agent.memory.len();
 
                 let start = std::time::Instant::now();
+                // Always run the spinner — it's TTY-aware (no-op outside
+                // a terminal) and now also stops via the agent loop's
+                // on_token("") notification before tool-call lines
+                // render, which prevents the spinner from racing with
+                // tool-call output on the same row.
                 let streaming = cfg.llm.streaming;
-                let _response = if streaming {
-                    let mut spinner = Some(agent::display::Spinner::start());
-                    let response = agent.process_message_with_callbacks(
-                        input,
-                        &mut |token| {
-                            if let Some(mut s) = spinner.take() {
-                                s.stop();
+                let mut spinner = Some(agent::display::Spinner::start());
+                let mut bot_prefix_printed = false;
+                let response = agent.process_message_with_callbacks(
+                    input,
+                    &mut |token| {
+                        if let Some(mut s) = spinner.take() {
+                            s.stop();
+                        }
+                        // The empty-string `on_token("")` is the
+                        // "tool-calls-incoming" signal — useful for
+                        // stopping the spinner but we mustn't print a
+                        // `bot>` prefix because there's no bot text yet.
+                        // Defer the prefix until a real (non-empty)
+                        // streamed token arrives.
+                        if streaming && !token.is_empty() {
+                            if !bot_prefix_printed {
                                 eprint!("{} ", "bot>".green().bold());
+                                bot_prefix_printed = true;
                             }
                             eprint!("{}", token);
-                        },
-                        &mut |tool_name, args| ask_approval(tool_name, args),
-                    );
-                    if let Some(mut s) = spinner.take() {
-                        s.stop();
-                        eprint!("{} ", "bot>".green().bold());
+                        }
+                    },
+                    &mut |tool_name, args| ask_approval(tool_name, args),
+                );
+                if let Some(mut s) = spinner.take() {
+                    s.stop();
+                }
+                if streaming {
+                    if !bot_prefix_printed {
+                        // Loop ended without any streamed text (e.g. all
+                        // tool calls + final empty content) — print prefix
+                        // + response so the user still sees a final line.
+                        print!("{} {}", "bot>".green().bold(), response);
                     }
                     eprintln!();
-                    response
                 } else {
-                    eprint!("{}", "[thinking...]".dimmed());
-                    let response = agent.process_message_with_callbacks(
-                        input,
-                        &mut |_| {},
-                        &mut |tool_name, args| ask_approval(tool_name, args),
-                    );
-                    eprint!("\r{}\r", " ".repeat(20));
                     println!("{} {}", "bot>".green().bold(), response);
-                    response
-                };
+                }
+                let _response = response;
                 let elapsed = start.elapsed();
                 println!("{}", format!("({:.1}s)", elapsed.as_secs_f64()).dimmed());
                 println!();
@@ -1026,36 +1040,35 @@ fn run_test_fix_loop(agent: &mut Agent, test_cmd: &str, cfg: &Config) {
         println!("{} Asking agent to fix...\n", ">>".cyan());
 
         let streaming = cfg.llm.streaming;
-        let response = if streaming {
-            let mut spinner = Some(agent::display::Spinner::start());
-            let response = agent.process_message_with_callbacks(
-                &fix_prompt,
-                &mut |token| {
-                    if let Some(mut s) = spinner.take() {
-                        s.stop();
+        let mut spinner = Some(agent::display::Spinner::start());
+        let mut bot_prefix_printed = false;
+        let response = agent.process_message_with_callbacks(
+            &fix_prompt,
+            &mut |token| {
+                if let Some(mut s) = spinner.take() {
+                    s.stop();
+                }
+                if streaming && !token.is_empty() {
+                    if !bot_prefix_printed {
                         eprint!("{} ", "bot>".green().bold());
+                        bot_prefix_printed = true;
                     }
                     eprint!("{}", token);
-                },
-                &mut |tool_name, args| ask_approval(tool_name, args),
-            );
-            if let Some(mut s) = spinner.take() {
-                s.stop();
-                eprint!("{} ", "bot>".green().bold());
+                }
+            },
+            &mut |tool_name, args| ask_approval(tool_name, args),
+        );
+        if let Some(mut s) = spinner.take() {
+            s.stop();
+        }
+        if streaming {
+            if !bot_prefix_printed {
+                print!("{} {}", "bot>".green().bold(), response);
             }
             eprintln!();
-            response
         } else {
-            eprint!("{}", "[thinking...]".dimmed());
-            let response = agent.process_message_with_callbacks(
-                &fix_prompt,
-                &mut |_| {},
-                &mut |tool_name, args| ask_approval(tool_name, args),
-            );
-            eprint!("\r{}\r", " ".repeat(20));
             println!("{} {}", "bot>".green().bold(), response);
-            response
-        };
+        }
 
         let _ = response; // Agent's fix is already applied via tools
     }
