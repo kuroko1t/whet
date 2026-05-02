@@ -1008,7 +1008,7 @@ mod tests {
         assert!(check_command_safety("env").is_err());
         assert!(check_command_safety("env | grep KEY").is_err());
         assert!(check_command_safety("printenv").is_err());
-        assert!(check_command_safety("printenv GEMINI_API_KEY").is_err());
+        assert!(check_command_safety("printenv MY_API_KEY").is_err());
     }
 
     #[test]

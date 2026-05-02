@@ -11,7 +11,7 @@
 <p align="center"><strong>An open-source terminal coding agent.</strong></p>
 
 <p align="center">
-Powered by local or cloud LLMs. Rust single-binary. No runtime dependencies.
+Powered by local LLMs — your code, prompts, and tool calls never leave your machine. Rust single-binary. No runtime dependencies.
 </p>
 
 <p align="center">
@@ -22,14 +22,14 @@ Powered by local or cloud LLMs. Rust single-binary. No runtime dependencies.
 
 ## What is Whet?
 
-Whet is an **open-source terminal coding agent** in the same category as Claude Code and similar tools. It lives in your terminal, understands your codebase, and writes code for you using any LLM.
+Whet is an **open-source local-LLM terminal coding agent** in the same category as Claude Code, but local-first by design. It lives in your terminal, understands your codebase, and writes code for you using a model that runs on your machine.
 
 **What makes it different:**
 
+- **Local-only** — Ollama, llama.cpp, LM Studio, vLLM, or any OpenAI-compatible local server. Your code, prompts, and tool calls never leave the box.
 - **Open source** (MIT) — you own the code, the data, and the workflow
-- **Provider-agnostic** — Ollama, llama.cpp, Anthropic Claude, Google Gemini, or any OpenAI-compatible API
 - **Single binary** — `cargo install` and you're done, no Node.js, no Python, no Docker
-- **Offline-capable** — pair with a local LLM and nothing ever leaves your machine
+- **Tuned for ~16 GB GPUs** — `qwen3.6:35b-a3b` (UD-Q3_K_M) reaches 11/11 on the bench while fitting in consumer VRAM
 
 ## Quick Start
 
@@ -38,7 +38,7 @@ Whet is an **open-source terminal coding agent** in the same category as Claude 
 git clone https://github.com/kuroko1t/whet.git
 cd whet && cargo install --path .
 
-# 2. Pull a local model (or configure a cloud provider)
+# 2. Pull a local model
 ollama pull qwen3.6:35b-a3b-q4_K_M   # recommended for 16GB+ GPUs; see Benchmark below
 
 # 3. Start coding
@@ -50,12 +50,7 @@ whet -m qwen3.6:35b-a3b-q4_K_M
 > for the data, and for an even faster setup using the `UD-Q3_K_M` variant + KV
 > cache quantization.
 
-Or use with a cloud provider:
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-whet -m claude-sonnet-4-5-20250929
-```
+Already running [LM Studio](https://lmstudio.ai/), [llama.cpp](https://github.com/ggml-org/llama.cpp), or [vLLM](https://github.com/vllm-project/vllm)? Point Whet at it via the OpenAI-compatible provider — see [Configuration](#configuration).
 
 ## Demo
 
@@ -253,9 +248,11 @@ Automatic conversation summarization prevents unbounded memory growth. Use `/com
 | Provider | Network | API Key | Config `provider` |
 |---|---|---|---|
 | [Ollama](https://ollama.com/) | Local | Not required | `"ollama"` |
-| OpenAI-compatible (llama.cpp, LM Studio, vLLM) | Local / Remote | Optional | `"openai_compat"` |
-| [Anthropic Claude](https://www.anthropic.com/) | Cloud | Required (`ANTHROPIC_API_KEY`) | `"anthropic"` |
-| [Google Gemini](https://ai.google.dev/) | Cloud | Required (`GEMINI_API_KEY`) | `"gemini"` |
+| OpenAI-compatible (llama.cpp, LM Studio, vLLM, …) | Local | Optional | `"openai_compat"` |
+
+Whet is local-only by design — there is no cloud-provider integration. If you want
+to compare a local agent against a hosted frontier model, run a separate tool side
+by side; the project intentionally doesn't ship API keys in any code path.
 
 ## Configuration
 
@@ -279,28 +276,6 @@ max_iterations = 10
 [memory]
 database_path = "~/.whet/memory.db"
 ```
-
-<details>
-<summary>Anthropic Claude</summary>
-
-```toml
-[llm]
-provider = "anthropic"
-model = "claude-sonnet-4-5-20250929"
-# api_key = "sk-ant-..."   # or set ANTHROPIC_API_KEY env var
-```
-</details>
-
-<details>
-<summary>Google Gemini</summary>
-
-```toml
-[llm]
-provider = "gemini"
-model = "gemini-2.0-flash"
-# api_key = "..."           # or set GEMINI_API_KEY env var
-```
-</details>
 
 <details>
 <summary>OpenAI-compatible (llama.cpp, LM Studio, vLLM)</summary>
@@ -345,8 +320,8 @@ whet config                      # show current configuration
 | | Whet | Claude Code |
 |---|---|---|
 | License | MIT (open source) | Proprietary |
-| LLM providers | Any (Ollama, Anthropic, Gemini, OpenAI-compat) | Anthropic only |
-| Offline mode | Yes (with local LLM) | No |
+| LLM providers | Local only (Ollama, llama.cpp, LM Studio, vLLM via OpenAI-compat) | Anthropic only (cloud) |
+| Offline mode | Yes (always — no cloud calls in any path) | No |
 | Runtime | Single Rust binary | Node.js |
 | Project instructions | `WHET.md` | `CLAUDE.md` |
 | MCP support | Yes | Yes |
@@ -415,8 +390,8 @@ whet (single binary)
 
   Terminal (REPL) <--> Agent Loop
                         |
-                        +-- LLM Provider
-                        |     Ollama / OpenAI / Anthropic / Gemini
+                        +-- LLM Provider (local only)
+                        |     Ollama / OpenAI-compat (llama.cpp, LM Studio, vLLM)
                         |
                         +-- Tool Executor
                         |     12 built-in (incl. subagent) + MCP + Skills
