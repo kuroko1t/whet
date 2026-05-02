@@ -150,9 +150,33 @@ If you're unsure which mode applies, lean toward proposing options for anything 
 - \"Commit the changes\" → git(\"status\") → git(\"add\", \".\") → git(\"commit\", \"-m message\")
 - \"Delete the old config\" → shell(\"rm old_config.toml\")
 
+## RECOVERING FROM FAILED TOOL CALLS
+
+When a tool call fails (non-zero exit, exception, test failure, missing file, etc.), your job is to FIX the root cause and re-run, NOT to write a long explanation telling the user how to fix it. Specifically:
+
+- pytest / cargo test / npm test reports failures → read the failing test output, find the bug in the code under test, edit the code, re-run the tests yourself.
+- Build fails → read the compiler error, edit the code, retry.
+- `mkdir`/`pip install`/migration script fails → diagnose, fix, retry.
+
+If you ran a command and the LAST tool call failed, do not produce a final response that just describes the failure or recommends manual steps. Use your tools to fix it. The exception is when the user explicitly asked for an explanation rather than a fix, or when the failure is genuinely outside what the agent can repair (e.g. a missing API key the agent can't obtain).
+
 ## CRITICAL: LANGUAGE RULE
 You MUST reply in the SAME language as the user's latest message. Do NOT reply in English if the user wrote in another language. This rule overrides all other formatting preferences.
 例: ユーザーが日本語で質問 → 日本語で回答。英語で質問 → 英語で回答。".to_string();
+
+    // Inject the actual working directory so the model never has to
+    // guess (or hallucinate placeholders like `/home/user/MyApp`).
+    // The `shell` tool inherits this cwd and it persists across calls,
+    // so the model should not prepend `cd /some/path` to commands.
+    if let Some(cwd) = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+    {
+        prompt.push_str("\n\n## Environment\n\n");
+        prompt.push_str(&format!("- Current working directory: `{}`\n", cwd));
+        prompt.push_str("- Shell calls run from this cwd; do NOT prepend `cd <path>` to commands unless you genuinely need to cross into a subdirectory of THIS cwd. Never `cd` to absolute paths you didn't list yourself.\n");
+        prompt.push_str("- For path arguments to write_file / read_file / edit_file / apply_diff, prefer paths relative to this cwd (e.g. `app.py`, `src/main.rs`) over absolute paths (`/app.py` writes to the filesystem root).\n");
+    }
 
     // Inject project instructions (WHET.md) before skills
     if let Some(instructions) = load_project_instructions() {
@@ -191,6 +215,44 @@ mod tests {
         assert!(prompt.contains("## Skills"));
         assert!(prompt.contains("### testing"));
         assert!(prompt.contains("Always write tests."));
+    }
+
+    #[test]
+    fn test_system_prompt_includes_cwd() {
+        // Regression guard: dog-food run (2026-05-02) caught the model
+        // hallucinating `cd /home/user/MyApp` because the system
+        // prompt never told it the actual cwd. Inject it directly.
+        let prompt = system_prompt(&[]);
+        assert!(
+            prompt.contains("## Environment"),
+            "Prompt must have an Environment section that names the cwd"
+        );
+        assert!(
+            prompt.contains("Current working directory:"),
+            "Prompt must explicitly label the cwd line"
+        );
+        assert!(
+            prompt.contains("do NOT prepend `cd"),
+            "Prompt must tell the model not to `cd` to invented paths"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_has_failure_recovery_rule() {
+        // Regression guard: dog-food run caught the "ran pytest, it
+        // failed, model wrote a long explanation about how to fix it
+        // and gave up" pattern. The prompt-level rule (paired with
+        // the Pattern 4 reprompt) tells the model to fix instead of
+        // explain.
+        let prompt = system_prompt(&[]);
+        assert!(
+            prompt.contains("RECOVERING FROM FAILED TOOL CALLS"),
+            "Prompt must have a dedicated failure-recovery section"
+        );
+        assert!(
+            prompt.contains("FIX the root cause and re-run"),
+            "Section must explicitly forbid 'explain instead of fix'"
+        );
     }
 
     #[test]
@@ -461,14 +523,24 @@ mod tests {
 
     #[test]
     fn test_prompt_no_old_project_names() {
+        // The test guards against stale references in the *static*
+        // prompt body. The Environment section injects the user's
+        // real cwd, which on legacy clones can still be a path like
+        // `…/clawbot/`; we filter that line out so a local-checkout
+        // path doesn't false-positive this guard.
         let prompt = system_prompt(&[]);
+        let static_prompt: String = prompt
+            .lines()
+            .filter(|line| !line.starts_with("- Current working directory:"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            !prompt.contains("hermit"),
-            "Prompt must not contain old project name 'hermit'"
+            !static_prompt.contains("hermit"),
+            "Static prompt must not contain old project name 'hermit'"
         );
         assert!(
-            !prompt.contains("clawbot"),
-            "Prompt must not contain old project name 'clawbot'"
+            !static_prompt.contains("clawbot"),
+            "Static prompt must not contain old project name 'clawbot'"
         );
     }
 
