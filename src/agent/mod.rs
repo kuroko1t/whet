@@ -573,6 +573,12 @@ impl Agent {
         // tool — i.e. it explored the workspace and then stopped.
         let mut has_acted: bool = false;
         let mut has_read: bool = false;
+        // Pattern 4 input: did the previous iteration's tool execution
+        // include any failures? Set at the END of each iteration that
+        // ran tools; cleared when the next iteration runs all-success
+        // tools. Used to detect the "ran a command, it failed, now I'm
+        // bailing with an explanation" pattern.
+        let mut last_iter_had_failure: bool = false;
 
         // Adaptive iteration cap: hit the configured cap, but if the model is
         // still actively making progress (a successful tool call within the
@@ -653,6 +659,42 @@ impl Agent {
                     ));
                     continue;
                 }
+                // Pattern 4: Re-prompt if the previous iteration's tools
+                // failed and the model is now exiting with explanatory
+                // text instead of fixing the failure. Catches the
+                // "pytest reported errors → model writes a long
+                // markdown explanation about how the user should fix
+                // it → exits without retrying" anti-pattern observed
+                // in dog-food runs. Requires:
+                //   (a) at least one tool call in the previous iteration failed,
+                //   (b) the current iteration is exiting (no tool calls),
+                //   (c) the final response has non-empty content
+                //       (an empty content + only-reads case is Pattern 3's job).
+                // Skipped when the user input was open-ended, because
+                // an open-ended exchange may legitimately end on a
+                // tradeoff/options reply rather than a fix.
+                else if reprompt_count < MAX_REPROMPTS
+                    && !user_asked_open_ended
+                    && last_iter_had_failure
+                    && !content.trim().is_empty()
+                {
+                    eprintln!(
+                        "  {}",
+                        "[re-prompt: tool call failed — push to fix instead of explain]".yellow()
+                    );
+                    self.stats.reprompts += 1;
+                    reprompt_count += 1;
+                    self.memory.push(Message::assistant(&content));
+                    self.memory.push(Message::user(
+                        "Your last tool call failed and you stopped before fixing it. \
+                         Don't describe the fix — apply it. Edit the failing code, \
+                         re-run the failing command, and only stop when the command \
+                         succeeds. If a dependency is missing, install it; if a path \
+                         is wrong, correct it; if a test reveals a bug, fix the bug \
+                         in the code under test.",
+                    ));
+                    continue;
+                }
                 // Pattern 3: Re-prompt if model is exiting after only reads.
                 // Requires:
                 //   (a) the model invoked at least one read-only tool this turn,
@@ -698,6 +740,12 @@ impl Agent {
             // Separate content from tool calls to avoid borrow issues
             let response_content = response.content;
             let tool_calls = effective_tool_calls;
+
+            // Reset Pattern 4 input for this iteration. We aggregate
+            // failures across the iteration's tool calls below; the
+            // accumulated value becomes the *previous*-iteration flag
+            // by the time the loop comes back around.
+            let mut iter_had_failure: bool = false;
 
             // Store tool calls in memory — move instead of clone
             self.memory
@@ -837,6 +885,9 @@ impl Agent {
                 };
 
                 self.stats.record_tool_call(tool_success);
+                if !tool_success {
+                    iter_had_failure = true;
+                }
                 if tool_success {
                     last_progress_iter = iteration;
                     if is_read_only_tool(&tool_call.name) {
@@ -890,6 +941,10 @@ impl Agent {
                 self.memory
                     .push(Message::tool_result(&tool_call.id, &result));
             }
+
+            // Roll the iteration's failure flag forward so Pattern 4
+            // sees it on the *next* iteration.
+            last_iter_had_failure = iter_had_failure;
 
             // Content alongside tool calls is already streamed to the user.
             // Don't add it as a separate memory message — the model would repeat itself.
@@ -1337,6 +1392,10 @@ mod tests {
 
     #[test]
     fn test_unknown_tool_handled_gracefully() {
+        // Sequence: bad tool call (fails) → explanation (Pattern 4
+        // fires) → final answer. Pattern 4 must reprompt because the
+        // model bailed with text after a tool failure; we provide a
+        // 3rd LlmResponse so the agent has somewhere to land.
         let llm = MockLlm::new(vec![
             LlmResponse {
                 content: None,
@@ -1352,10 +1411,16 @@ mod tests {
                 tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
+            LlmResponse {
+                content: Some("Final answer: tool unavailable.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
         ]);
         let mut agent = make_agent(Box::new(llm));
         let response = agent.process_message("Use nonexistent tool");
-        assert_eq!(response, "Sorry, that tool doesn't exist.");
+        assert_eq!(response, "Final answer: tool unavailable.");
+        assert_eq!(agent.stats.reprompts, 1);
 
         // Check that "Unknown tool" message was stored in memory
         let tool_result_msg = agent
@@ -1370,6 +1435,9 @@ mod tests {
 
     #[test]
     fn test_tool_execution_error_handled() {
+        // Same shape as test_unknown_tool_handled_gracefully — the
+        // tool fails, the model explains, Pattern 4 reprompts, the
+        // 3rd response lands.
         let llm = MockLlm::new(vec![
             LlmResponse {
                 content: None,
@@ -1385,10 +1453,16 @@ mod tests {
                 tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
+            LlmResponse {
+                content: Some("OK, no file to read.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
         ]);
         let mut agent = make_agent(Box::new(llm));
         let response = agent.process_message("Read a missing file");
-        assert_eq!(response, "The file doesn't exist.");
+        assert_eq!(response, "OK, no file to read.");
+        assert_eq!(agent.stats.reprompts, 1);
 
         // Check that error was stored as tool result
         let tool_result_msg = agent
@@ -1863,7 +1937,9 @@ mod tests {
 
     #[test]
     fn test_tool_denied_by_approval_callback() {
-        // shell tool is Dangerous → needs approval in Default mode
+        // shell tool is Dangerous → needs approval in Default mode.
+        // Denial counts as tool_success=false → Pattern 4 fires, so
+        // we provide a 3rd response for the agent to land on.
         let llm = MockLlm::new(vec![
             LlmResponse {
                 content: None,
@@ -1879,6 +1955,11 @@ mod tests {
                 tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
+            LlmResponse {
+                content: Some("Stopping — user denied.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
         ]);
         let mut agent = make_agent_with_mode(Box::new(llm), PermissionMode::Default);
 
@@ -1888,7 +1969,8 @@ mod tests {
             &mut |_, _| false, // Always deny
         );
 
-        assert_eq!(response, "I couldn't execute the command.");
+        assert_eq!(response, "Stopping — user denied.");
+        assert_eq!(agent.stats.reprompts, 1);
         // Check that the tool result contains the denial message
         let tool_result = agent
             .memory
@@ -2048,7 +2130,8 @@ mod tests {
 
     #[test]
     fn test_plan_mode_blocks_dangerous_tools() {
-        // shell is Dangerous → should be blocked in plan mode
+        // shell is Dangerous → should be blocked in plan mode.
+        // Block counts as tool_success=false so Pattern 4 fires.
         let llm = MockLlm::new(vec![
             LlmResponse {
                 content: None,
@@ -2064,6 +2147,11 @@ mod tests {
                 tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
+            LlmResponse {
+                content: Some("OK, plan-mode prevents that.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
         ]);
         let mut agent = Agent::new(
             Box::new(llm),
@@ -2076,7 +2164,8 @@ mod tests {
         );
 
         let response = agent.process_message("Delete everything");
-        assert_eq!(response, "Blocked.");
+        assert_eq!(response, "OK, plan-mode prevents that.");
+        assert_eq!(agent.stats.reprompts, 1);
 
         let tool_result = agent
             .memory
@@ -2088,7 +2177,8 @@ mod tests {
 
     #[test]
     fn test_plan_mode_blocks_moderate_tools() {
-        // write_file is Moderate → should be blocked in plan mode
+        // write_file is Moderate → should be blocked in plan mode.
+        // Block counts as tool_success=false so Pattern 4 fires.
         let llm = MockLlm::new(vec![
             LlmResponse {
                 content: None,
@@ -2104,6 +2194,11 @@ mod tests {
                 tool_calls: vec![],
                 usage: TokenUsage::default(),
             },
+            LlmResponse {
+                content: Some("Plan mode blocks writes.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
         ]);
         let mut agent = Agent::new(
             Box::new(llm),
@@ -2116,7 +2211,8 @@ mod tests {
         );
 
         let response = agent.process_message("Write file");
-        assert_eq!(response, "Can't write.");
+        assert_eq!(response, "Plan mode blocks writes.");
+        assert_eq!(agent.stats.reprompts, 1);
 
         let tool_result = agent
             .memory
@@ -3201,6 +3297,89 @@ mod tests {
         assert_eq!(
             agent.stats.reprompts, 0,
             "no re-prompt should fire when user asked open-ended"
+        );
+    }
+
+    #[test]
+    fn test_pattern4_failed_then_explain_reprompts() {
+        // Setup: iteration 1 calls read_file on a non-existent path
+        // (returns ToolError → tool_success=false → iter_had_failure=true);
+        // iteration 2 returns explanation text only. Pattern 4 should
+        // fire on iteration 2's check, push the model to fix instead
+        // of explain, and the reprompt counter should be 1. Catches
+        // the "ran a command, it failed, model writes a markdown
+        // explanation, exits without retrying" anti-pattern observed
+        // in dog-food runs (PR #15 review).
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({
+                        "path": "definitely_not_a_file_xyz_99887766.txt"
+                    }),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some(
+                    "The file doesn't exist. To fix this you would need \
+                     to create it first using `touch foo.txt`."
+                        .to_string(),
+                ),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let _ = agent.process_message_with_callbacks(
+            "Read the file foo.txt",
+            &mut |_| {},
+            &mut |_, _| true,
+        );
+        assert_eq!(
+            agent.stats.reprompts, 1,
+            "failed-then-explain should trigger exactly one Pattern 4 re-prompt"
+        );
+    }
+
+    #[test]
+    fn test_pattern4_does_not_fire_when_previous_iteration_succeeded() {
+        // Setup: iteration 1 reads Cargo.toml (succeeds → iter_had_failure=false);
+        // iteration 2 returns text. No tool failed, so Pattern 4 must NOT
+        // fire and reprompts must stay 0. Guards against accidentally
+        // re-prompting normal "read → answer" turns.
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_0".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "Cargo.toml"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("The project is whet.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let mut agent = make_agent(Box::new(llm));
+        let _ = agent.process_message_with_callbacks(
+            "What's the project name?",
+            &mut |_| {},
+            &mut |_, _| true,
+        );
+        assert_eq!(
+            agent.stats.reprompts, 0,
+            "successful tool followed by answer must not trigger Pattern 4"
         );
     }
 
