@@ -10,7 +10,7 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file at the given path"
+        "Create or overwrite a file. Use a path relative to the current working directory (e.g. `app.py`, `src/main.rs`) unless you have a specific reason to write outside the project."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -19,7 +19,7 @@ impl Tool for WriteFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The file path to write to"
+                    "description": "File path to write to. Prefer a path relative to the current working directory (e.g. `app.py`, `src/main.rs`) — avoid absolute paths like `/app.py` (which writes to the filesystem root) unless that is the explicit intent."
                 },
                 "content": {
                     "type": "string",
@@ -266,6 +266,38 @@ mod tests {
 
         let read_back = fs::read_to_string(&target).unwrap();
         assert_eq!(read_back, "written via symlink");
+    }
+
+    #[test]
+    fn test_description_recommends_relative_path() {
+        // Regression guard: the dog-food run on 2026-05-02 found the
+        // model wrote to `/app.py` (filesystem root) twice before
+        // recovering with `./app.py`, costing 2 wasted tool calls.
+        // The fix is purely descriptive — the schema's path-parameter
+        // doc must steer the model toward relative paths so the same
+        // class of mistake doesn't repeat across languages / projects.
+        let tool = WriteFileTool;
+        let schema = tool.parameters_schema();
+        let path_desc = schema["properties"]["path"]["description"]
+            .as_str()
+            .expect("path description must exist");
+        assert!(
+            path_desc.contains("relative to the current working directory"),
+            "path description must explicitly recommend a relative path (got: {path_desc:?})"
+        );
+        assert!(
+            path_desc.contains("absolute"),
+            "path description must call out absolute paths as the trap to avoid (got: {path_desc:?})"
+        );
+        // Top-level tool description should also mention it so models
+        // that read tool descriptions but skim parameter schemas still
+        // see the hint.
+        assert!(
+            tool.description()
+                .contains("relative to the current working directory"),
+            "tool description must also mention relative paths (got: {:?})",
+            tool.description()
+        );
     }
 
     #[test]
