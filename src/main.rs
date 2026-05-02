@@ -25,36 +25,6 @@ fn create_provider(cfg: &Config, model: &str) -> Box<dyn LlmProvider> {
             cfg.llm.api_key.clone(),
             cfg.llm.options.clone(),
         )),
-        "anthropic" => {
-            let api_key = cfg
-                .llm
-                .api_key
-                .clone()
-                .unwrap_or_else(|| std::env::var("ANTHROPIC_API_KEY").unwrap_or_default());
-            let base_url =
-                if cfg.llm.base_url.is_empty() || cfg.llm.base_url == "http://localhost:11434" {
-                    "https://api.anthropic.com".to_string()
-                } else {
-                    cfg.llm.base_url.clone()
-                };
-            Box::new(llm::anthropic::AnthropicClient::new(
-                &base_url, model, api_key,
-            ))
-        }
-        "gemini" => {
-            let api_key = cfg
-                .llm
-                .api_key
-                .clone()
-                .unwrap_or_else(|| std::env::var("GEMINI_API_KEY").unwrap_or_default());
-            let base_url =
-                if cfg.llm.base_url.is_empty() || cfg.llm.base_url == "http://localhost:11434" {
-                    "https://generativelanguage.googleapis.com".to_string()
-                } else {
-                    cfg.llm.base_url.clone()
-                };
-            Box::new(llm::gemini::GeminiClient::new(&base_url, model, api_key))
-        }
         _ => Box::new(llm::ollama::OllamaClient::with_options(
             &cfg.llm.base_url,
             model,
@@ -66,7 +36,9 @@ fn create_provider(cfg: &Config, model: &str) -> Box<dyn LlmProvider> {
 #[derive(Parser)]
 #[command(name = "whet")]
 #[command(version)]
-#[command(about = "An open-source terminal coding agent. Powered by local or cloud LLMs.")]
+#[command(
+    about = "An open-source local-LLM terminal coding agent (Ollama / llama.cpp / LM Studio / vLLM)."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

@@ -1,9 +1,9 @@
 [package]
 name = "whet"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
-description = "An open-source terminal coding agent. Powered by local or cloud LLMs."
+description = "An open-source local-LLM terminal coding agent (Ollama / llama.cpp / LM Studio / vLLM)."
 license = "MIT"
 repository = "https://github.com/kuroko1t/whet"
 readme = "README.md"

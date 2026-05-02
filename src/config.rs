@@ -97,8 +97,8 @@ pub struct AgentConfig {
     pub context_compression: bool,
     /// Absolute fallback token threshold for compaction. Used when
     /// `compaction_token_threshold_ratio` is 0 (explicit opt-out) or
-    /// when `num_ctx` is not set (cloud providers without a
-    /// model-specific context-window declaration). Default 5000.
+    /// when `num_ctx` is not set (e.g. an OpenAI-compat backend that
+    /// doesn't expose the model's context window). Default 5000.
     #[serde(default = "default_compaction_token_threshold")]
     pub compaction_token_threshold: usize,
     /// Compaction trigger as a fraction of `[llm.options].num_ctx`.
