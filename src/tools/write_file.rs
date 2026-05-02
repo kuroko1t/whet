@@ -10,7 +10,7 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Create or overwrite a file. Use a path relative to the current working directory (e.g. `app.py`, `src/main.rs`) unless you have a specific reason to write outside the project."
+        "Create or overwrite a file. Use a path relative to the current working directory (e.g. `app.py`, `src/main.rs`) unless you have a specific reason to write outside the project. Parent directories are created automatically — you do NOT need to call `shell(mkdir -p …)` before writing into a new subdirectory."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -56,11 +56,36 @@ impl Tool for WriteFileTool {
             }
         }
 
+        // Auto-create the parent directory if it doesn't exist yet.
+        // Spares the model from having to chain `shell(mkdir -p …)` →
+        // `write_file(…)` whenever a multi-file scaffold lands a file
+        // into a fresh subdirectory (e.g. `templates/index.html`,
+        // `src/main.rs`). Safe because `is_path_safe(path)` already
+        // gated the full target path above, so any parent created
+        // here is a prefix of an already-allowed path.
+        let mut created_parent = false;
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    ToolError::ExecutionFailed(format!(
+                        "Failed to create parent directory for '{}': {}",
+                        path, e
+                    ))
+                })?;
+                created_parent = true;
+            }
+        }
+
         std::fs::write(path, content).map_err(|e| {
             ToolError::ExecutionFailed(format!("Failed to write '{}': {}", path, e))
         })?;
 
-        Ok(format!("Successfully wrote to '{}'", path))
+        let suffix = if created_parent {
+            " (created parent directory)"
+        } else {
+            ""
+        };
+        Ok(format!("Successfully wrote to '{}'{}", path, suffix))
     }
 }
 
@@ -135,14 +160,114 @@ mod tests {
     }
 
     #[test]
-    fn test_write_nonexistent_parent_dir() {
+    fn test_write_creates_missing_parent_dir() {
+        // Behaviour change (was ExecutionFailed pre-auto-mkdir):
+        // a single missing parent directory is now created on the
+        // fly. This eliminates the dog-food failure pattern where the
+        // model wrote `templates/index.html` before chaining a mkdir.
+        let tool = WriteFileTool;
+        let dir = tempfile::TempDir::new().unwrap();
+        let nested = dir.path().join("brand_new_subdir/file.txt");
+
+        let result = tool
+            .execute(json!({
+                "path": nested.display().to_string(),
+                "content": "hello"
+            }))
+            .unwrap();
+        assert!(result.contains("Successfully wrote"));
+        assert!(
+            result.contains("(created parent directory)"),
+            "success message should announce the auto-mkdir, got: {result:?}"
+        );
+
+        let read_back = fs::read_to_string(&nested).unwrap();
+        assert_eq!(read_back, "hello");
+        assert!(nested.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn test_write_creates_deeply_nested_parents() {
+        // Auto-mkdir is recursive — a 3-level miss is created in one
+        // call. Same generic fix covers `src/components/foo/bar.rs`,
+        // `templates/admin/users.html`, etc.
+        let tool = WriteFileTool;
+        let dir = tempfile::TempDir::new().unwrap();
+        let deep = dir.path().join("a/b/c/file.txt");
+
+        let result = tool
+            .execute(json!({
+                "path": deep.display().to_string(),
+                "content": "deep"
+            }))
+            .unwrap();
+        assert!(result.contains("Successfully wrote"));
+        assert!(result.contains("(created parent directory)"));
+        assert!(deep.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn test_write_no_mkdir_message_when_parent_already_exists() {
+        // Negative companion: when the parent already exists, the
+        // success message must NOT claim it was created. Guards
+        // against false-positive logging on every write.
+        let tool = WriteFileTool;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("file.txt");
+
+        let result = tool
+            .execute(json!({
+                "path": path.display().to_string(),
+                "content": "x"
+            }))
+            .unwrap();
+        assert!(result.contains("Successfully wrote"));
+        assert!(
+            !result.contains("(created parent directory)"),
+            "must not claim mkdir when parent already existed, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_write_creates_no_dir_for_bare_filename() {
+        // A path with no parent component (e.g. `foo.txt` written into
+        // the cwd) should NOT trigger the create_dir_all branch — the
+        // empty parent path would be a degenerate input.
+        let tool = WriteFileTool;
+        let dir = tempfile::TempDir::new().unwrap();
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let result = tool.execute(json!({
+            "path": "bare_filename.txt",
+            "content": "x"
+        }));
+        std::env::set_current_dir(prev_cwd).unwrap();
+        let result = result.unwrap();
+        assert!(result.contains("Successfully wrote"));
+        assert!(!result.contains("(created parent directory)"));
+    }
+
+    #[test]
+    fn test_write_does_not_mkdir_into_blocked_path() {
+        // Auto-mkdir must NOT happen when is_path_safe rejects the
+        // target — the safety check is the gate, not an afterthought.
+        // `/etc/sudoers.d/*` is on the prefix blocklist, so even a
+        // never-seen-before child path is rejected before the mkdir
+        // branch runs.
         let tool = WriteFileTool;
         let result = tool.execute(json!({
-            "path": "/tmp/whet_nonexistent_dir_xyz/file.txt",
-            "content": "hello"
+            "path": "/etc/sudoers.d/whet_should_not_create/file.txt",
+            "content": "bad"
         }));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::ExecutionFailed(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::PermissionDenied(_)
+        ));
+        assert!(
+            !std::path::Path::new("/etc/sudoers.d/whet_should_not_create").exists(),
+            "blocked path must not have been mkdir'd as a side effect"
+        );
     }
 
     #[test]
