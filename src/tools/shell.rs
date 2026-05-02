@@ -14,7 +14,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command"
+        "Execute a shell command. A non-zero exit code is reported back as a tool error so you can detect failed builds, failed tests, and similar conditions and react to them. If a command legitimately exits non-zero (e.g. grep with no matches), append `|| true` to suppress that signal."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -100,10 +100,19 @@ impl Tool for ShellTool {
 
                 let exit_code = status.code().unwrap_or(-1);
                 if exit_code != 0 {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(&format!("[exit code: {}]", exit_code));
+                    // Surface non-zero exit as a tool error so the
+                    // agent's Pattern 4 (failed-then-explain) reprompt
+                    // fires when the model bails after a failed
+                    // build / test / install. The error message keeps
+                    // the full stdout+stderr so the model can still
+                    // see WHAT failed and use that to fix it.
+                    let prefix = format!("Command exited with code {}", exit_code);
+                    let full = if result.is_empty() {
+                        prefix
+                    } else {
+                        format!("{}\n{}", prefix, result)
+                    };
+                    return Err(ToolError::ExecutionFailed(full));
                 }
 
                 Ok(result)
@@ -204,10 +213,49 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_failing_command_reports_exit_code() {
+    fn test_shell_failing_command_returns_err_with_exit_code() {
+        // Behaviour change (was Ok with `[exit code: 1]` suffix
+        // pre-2026-05): a non-zero exit is now surfaced as a tool
+        // error so the agent's Pattern 4 reprompt can detect the
+        // failure. The error message must still contain the exit
+        // code so the model can see what happened.
         let tool = ShellTool;
-        let result = tool.execute(json!({"command": "false"})).unwrap();
-        assert!(result.contains("[exit code: 1]"));
+        let result = tool.execute(json!({"command": "false"}));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Command exited with code 1"),
+            "error message must surface the exit code, got: {msg:?}"
+        );
+        assert!(matches!(err, ToolError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_shell_failing_command_preserves_output_in_err() {
+        // Regression guard: the err must include stdout/stderr from
+        // the failing command so the model can fix the root cause
+        // instead of guessing.
+        let tool = ShellTool;
+        let result = tool.execute(json!({
+            "command": "echo first_line && echo second_line >&2 && false"
+        }));
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("first_line"), "stdout must survive: {err:?}");
+        assert!(err.contains("second_line"), "stderr must survive: {err:?}");
+    }
+
+    #[test]
+    fn test_shell_failure_can_be_suppressed_with_or_true() {
+        // The escape hatch documented in the tool description: a
+        // command that legitimately exits non-zero (grep miss, test
+        // -f, etc.) can be suppressed by appending `|| true`.
+        let tool = ShellTool;
+        let result = tool
+            .execute(json!({"command": "false || true"}))
+            .expect("|| true should produce a successful overall exit");
+        // `false || true` exits 0 with no output.
+        assert!(result.is_empty(), "got: {result:?}");
     }
 
     #[test]
@@ -251,8 +299,8 @@ mod tests {
     fn test_shell_empty_command() {
         let tool = ShellTool;
         let result = tool.execute(json!({"command": ""})).unwrap();
-        // Empty command should succeed with empty output
-        assert!(result.is_empty() || result.contains("exit code"));
+        // Empty command runs `sh -c ""` which exits 0 with no output.
+        assert!(result.is_empty(), "got: {result:?}");
     }
 
     #[test]
