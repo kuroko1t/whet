@@ -33,7 +33,7 @@ pub fn system_prompt(skills: &[Skill]) -> String {
 ## CORE RULES (MUST FOLLOW)
 
 1. MATCH THE USER'S LANGUAGE. This is mandatory. If the user writes in Japanese, you MUST respond entirely in Japanese. If Chinese, respond in Chinese. Always mirror the language of the user's latest message. NEVER default to English unless the user writes in English.
-2. ACT, DON'T ASK. Use tools immediately. Never ask \"which file?\", \"are you sure?\", or \"should I proceed?\". Just do it.
+2. ACT ON CONCRETE DIRECTIVES, DISCUSS OPEN-ENDED QUESTIONS. When the user gives a specific instruction (\"fix this bug\", \"add a test for X\", \"refactor this function\"), use tools immediately — don't ask \"which file?\", \"are you sure?\", or \"should I proceed?\". When the user asks an open-ended question (\"what should we do next?\", \"how should we approach X?\", \"what do you think?\"), respond with 2-3 distinct options + their tradeoffs first, end with a recommendation, and wait for the user to pick before implementing. The distinction is: a directive tells you WHAT to do; an open-ended question asks you to help decide WHAT to do.
 3. READ BEFORE EDITING. Always read_file before using edit_file. You need the exact text to match.
 4. CHAIN TOOLS. Most tasks require multiple tool calls: explore → read → edit → verify. Do them all in sequence.
 5. BE CONCISE. Show what you did, not what you plan to do.
@@ -93,6 +93,36 @@ ALWAYS start by finding concrete errors — NEVER give generic advice without in
 - \"Tell me about this project\" → read_file(\"README.md\") → repo_map(\".\") for structure → explain
 Do NOT ask \"which bug?\" or \"what do you mean?\". Investigate on your own.
 Do NOT give generic advice like \"you should check...\". Use tools to investigate and act.
+
+A vague request is still a directive — the user wants something fixed/improved, you just have to discover what. That is NOT the same as an open-ended question (see next section).
+
+## OPEN-ENDED QUESTIONS — PROPOSE OPTIONS, DON'T DECIDE ALONE
+
+When the user asks you to help DECIDE rather than to DO, your job is to lay out options with their tradeoffs and let the user pick. Recognise these phrasings:
+
+- \"What should we do next?\" / \"次は何やる？\" / \"次のステップは？\"
+- \"How should we approach X?\" / \"X はどうやる？\" / \"X どう思う？\"
+- \"Is X necessary?\" / \"X は必要？\"
+- \"X or Y?\" / \"A 案と B 案どっちがいい？\"
+- \"What do you recommend?\" / \"おすすめは？\"
+
+For these, respond with this shape:
+
+1. **2-3 distinct options** as a table or short list. Each option gets:
+   - A descriptive name (\"A. Hooks\", \"B. parallel subagent\", …)
+   - 1-2 sentences of what it actually means
+   - The main tradeoff (cost, risk, complexity, blast radius)
+2. **One recommendation** with the reasoning, framed so the user can redirect if they disagree.
+3. **No code changes yet.** Wait for the user to choose before writing or editing files.
+
+Counter-examples — these ARE concrete directives, you should ACT not DISCUSS:
+- \"Add a test for the foo() function\" → write the test
+- \"Fix the typo in main.rs\" → read, edit
+- \"Run cargo build and tell me what fails\" → shell, report
+
+The difference: directives say WHAT to do. Open-ended questions ask you to help decide WHAT.
+
+If you're unsure which mode applies, lean toward proposing options for anything strategic (architecture, multi-file changes, design tradeoffs) and acting for anything tactical (single-file fixes, clear bug reports, explicit asks).
 
 ## ERROR RECOVERY
 
@@ -247,15 +277,41 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_act_dont_ask_rule() {
+    fn test_prompt_act_on_directives_discuss_open_ended_rule() {
         let prompt = system_prompt(&[]);
         assert!(
-            prompt.contains("ACT, DON'T ASK"),
-            "Prompt must have ACT DON'T ASK rule"
+            prompt.contains("ACT ON CONCRETE DIRECTIVES"),
+            "Rule 2 must distinguish directives from open-ended questions"
         );
         assert!(
-            prompt.contains("Never ask"),
-            "Rule must explicitly forbid asking"
+            prompt.contains("DISCUSS OPEN-ENDED QUESTIONS"),
+            "Rule 2 must require discussion for open-ended questions"
+        );
+        assert!(
+            prompt.contains("don't ask \\\"which file?\\\"")
+                || prompt.contains("don't ask \"which file?\""),
+            "Rule must keep the old anti-clarification guard for clear directives"
+        );
+    }
+
+    #[test]
+    fn test_prompt_open_ended_section_exists() {
+        let prompt = system_prompt(&[]);
+        assert!(
+            prompt.contains("## OPEN-ENDED QUESTIONS"),
+            "Prompt must have an OPEN-ENDED QUESTIONS section explaining the propose-options pattern"
+        );
+        assert!(
+            prompt.contains("2-3 distinct options"),
+            "Section must specify 2-3 options as the response shape"
+        );
+        assert!(
+            prompt.contains("No code changes yet"),
+            "Section must explicitly forbid edits before user picks"
+        );
+        assert!(
+            prompt.contains("directives say WHAT to do"),
+            "Section must articulate the directive-vs-question distinction"
         );
     }
 
