@@ -10,6 +10,25 @@ use std::sync::OnceLock;
 /// on navigation/sidebars before reaching the article body.
 pub const MAX_MARKDOWN_CHARS: usize = 32_000;
 
+/// Shared HTML→markdown converter pre-configured to drop common
+/// chrome elements (`<nav>`, `<header>`, `<footer>`, `<aside>`,
+/// `<form>`, `<script>`, `<style>`) before the conversion proper.
+/// Built once; htmd's converters are cheap to clone but cheaper to
+/// reuse. Stripping chrome is what gets the article body of sites
+/// like Wikipedia / GitHub / MDN into the 32 KB cap on real-world
+/// pages — the raw markdown of those sites burns most of its first
+/// 30 KB on side navigation, header menus, and footers.
+fn html_converter() -> &'static htmd::HtmlToMarkdown {
+    static CONVERTER: OnceLock<htmd::HtmlToMarkdown> = OnceLock::new();
+    CONVERTER.get_or_init(|| {
+        htmd::HtmlToMarkdown::builder()
+            .skip_tags(vec![
+                "nav", "header", "footer", "aside", "form", "script", "style",
+            ])
+            .build()
+    })
+}
+
 /// Shared HTTP client. Configured with:
 ///   - 30 s overall timeout.
 ///   - Limited redirects (5) with per-hop SSRF re-check via the
@@ -119,7 +138,7 @@ pub fn fetch_and_convert(url: &str) -> Result<String, ToolError> {
         // Empty content-type defaults to HTML conversion — many servers
         // return text without an explicit content-type and the page is
         // still HTML-shaped.
-        htmd::convert(&body).map_err(|e| {
+        html_converter().convert(&body).map_err(|e| {
             ToolError::ExecutionFailed(format!("Failed to convert HTML to markdown: {}", e))
         })?
     } else {
@@ -352,6 +371,87 @@ mod tests {
         let md = htmd::convert(html).unwrap();
         assert!(md.contains("fn main"));
         assert!(md.contains("```"));
+    }
+
+    // --- chrome stripping via html_converter() ---
+
+    #[test]
+    fn test_converter_strips_nav_and_header_and_footer() {
+        // Regression guard for the Wikipedia-chrome problem: real
+        // pages waste tens of KB on <nav>/<header>/<footer>/<aside>
+        // before the article body, which then never fits under the
+        // 32 KB cap. Our shared converter drops those wholesale.
+        let html = r#"
+            <html><body>
+                <header><nav><a href="/home">Home</a> <a href="/about">About</a></nav></header>
+                <main><h1>Real Title</h1><p>Real body.</p></main>
+                <aside><a>related link</a></aside>
+                <footer>© 2026 site</footer>
+            </body></html>
+        "#;
+        let md = html_converter().convert(html).unwrap();
+        assert!(
+            md.contains("Real Title"),
+            "main heading must survive: {md:?}"
+        );
+        assert!(md.contains("Real body"), "main body must survive: {md:?}");
+        assert!(
+            !md.contains("Home") && !md.contains("About"),
+            "<nav> contents must be dropped: {md:?}"
+        );
+        assert!(
+            !md.contains("related link"),
+            "<aside> contents must be dropped: {md:?}"
+        );
+        assert!(
+            !md.contains("© 2026"),
+            "<footer> contents must be dropped: {md:?}"
+        );
+    }
+
+    #[test]
+    fn test_converter_strips_script_and_style() {
+        // We rely on htmd to strip <script>/<style> contents on top
+        // of our nav-class stripping. Confirm both paths kill them.
+        let html = r#"
+            <html><head><style>body { color: red }</style></head>
+            <body>
+                <script>alert('xss')</script>
+                <p>Visible text</p>
+            </body></html>
+        "#;
+        let md = html_converter().convert(html).unwrap();
+        assert!(md.contains("Visible text"), "got: {md:?}");
+        assert!(!md.contains("color: red"), "got: {md:?}");
+        assert!(!md.contains("alert"), "got: {md:?}");
+    }
+
+    #[test]
+    fn test_converter_strips_forms() {
+        // <form> blocks (search bars, login forms) are common page
+        // chrome and very rarely contain user-relevant content.
+        let html = r#"
+            <html><body>
+                <form><input name="q"><button>Search</button></form>
+                <article><p>Article prose.</p></article>
+            </body></html>
+        "#;
+        let md = html_converter().convert(html).unwrap();
+        assert!(md.contains("Article prose"));
+        assert!(!md.contains("Search"));
+    }
+
+    #[test]
+    fn test_converter_preserves_article_and_main() {
+        // The shared converter must NOT drop semantic main-content
+        // tags. If it did, every well-marked-up page would lose its
+        // body to the chrome-stripping pass.
+        let html = r#"<article><h2>Section</h2><p>Body in article.</p></article>
+                      <main><p>Body in main.</p></main>"#;
+        let md = html_converter().convert(html).unwrap();
+        assert!(md.contains("Section"));
+        assert!(md.contains("Body in article"));
+        assert!(md.contains("Body in main"));
     }
 
     // --- truncation ---
