@@ -106,6 +106,31 @@ fn validate_redirect_target(url: &str) -> Result<(), String> {
     validate_url(url).map(|_| ()).map_err(|e| format!("{}", e))
 }
 
+/// Structured result of a successful `fetch_and_convert` call. Lets
+/// the agent special-case pass the final-after-redirect URL into the
+/// extraction footer (so the user sees where the answer actually
+/// came from when a same-host redirect rewrote the path) and lets
+/// the bare-fetch path attach a truncation notice without parsing
+/// magic substrings out of the body. Replaces the earlier
+/// `fetch_and_convert -> String` shape flagged in the code review.
+///
+/// `content_type` and `status` are populated but not yet consumed by
+/// any caller; they are part of the documented internal contract so
+/// future additions (a `/web` debug command, content-type-based
+/// dispatch, structured failure logs) don't need a second refactor
+/// pass. `#[allow(dead_code)]` until then.
+#[derive(Debug, Clone)]
+pub(crate) struct FetchResult {
+    pub markdown: String,
+    pub final_url: String,
+    #[allow(dead_code)]
+    pub content_type: String,
+    #[allow(dead_code)]
+    pub status: u16,
+    pub truncated: bool,
+    pub original_chars: usize,
+}
+
 pub struct WebFetchTool;
 
 impl Tool for WebFetchTool {
@@ -114,7 +139,12 @@ impl Tool for WebFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch a URL and return its content as markdown. When the optional `prompt` argument is provided, the page is additionally passed through a focused-extraction step (an internal LLM call) and the answer to your prompt is returned instead of the raw page. Use `prompt` for \"find X in this page\" queries; omit it when you want the markdown body for further inspection. Only http(s); private/loopback hosts are blocked."
+        "Fetch a URL and return content as markdown (up to 32 K chars). \
+         STRONGLY PREFER passing the optional `prompt` argument: with it, an internal LLM call extracts a focused answer to your question from the fetched page and returns just that answer (typically 1–3 K tokens) instead of the full page (up to 32 K). \
+         Omit `prompt` only when you genuinely need to read or quote the whole page body. \
+         Use `prompt` for: looking up a fact, summarising a section, checking whether a topic is covered. \
+         Only http(s); private/loopback/CGNAT hosts are blocked. \
+         Cross-host redirects are refused — refetch the new URL explicitly if you see one."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -146,16 +176,31 @@ impl Tool for WebFetchTool {
         let url = args["url"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'url' argument".to_string()))?;
-        fetch_and_convert(url)
+        let result = fetch_and_convert(url)?;
+        // Bare-fetch path: emit the markdown plus a tail notice when
+        // the body was truncated. The structured FetchResult.truncated
+        // / original_chars flags carry the signal explicitly (no
+        // magic substrings) and we format the user-facing notice
+        // here so the bare-fetch text is self-describing.
+        if result.truncated {
+            Ok(format!(
+                "{}\n\n_(truncated to {} chars; original was {} chars)_",
+                result.markdown, MAX_MARKDOWN_CHARS, result.original_chars
+            ))
+        } else {
+            Ok(result.markdown)
+        }
     }
 }
 
 /// Fetch a URL, validate it against SSRF rules, convert the HTML body
 /// to markdown via `htmd`, and truncate to `MAX_MARKDOWN_CHARS`.
-/// Exposed `pub(crate)` so the agent loop can call it from the
-/// `web_fetch + prompt` special case without duplicating the HTTP and
-/// conversion plumbing.
-pub(crate) fn fetch_and_convert(url: &str) -> Result<String, ToolError> {
+/// Returns a structured `FetchResult` so callers can see status,
+/// content-type, the post-redirect final URL, and whether truncation
+/// fired — instead of having to grep magic substrings out of a bare
+/// string body. Exposed `pub(crate)` so the agent loop's
+/// `web_fetch + prompt` special case can use it directly.
+pub(crate) fn fetch_and_convert(url: &str) -> Result<FetchResult, ToolError> {
     // Resolve + validate the URL's host once. The returned addresses
     // are then pinned on the per-request client so reqwest's connect
     // step uses the same IPs we just validated (closes DNS rebinding).
@@ -185,6 +230,14 @@ pub(crate) fn fetch_and_convert(url: &str) -> Result<String, ToolError> {
             status.canonical_reason().unwrap_or("Unknown")
         )));
     }
+
+    // Capture the URL reqwest actually settled on after any same-host
+    // redirect, so callers can report THIS to the user instead of the
+    // input string (which may have moved). The redirect policy
+    // refuses cross-host hops, so this is always within the original
+    // pinned-IP host.
+    let final_url = response.url().to_string();
+    let status_code = status.as_u16();
 
     // Defensive cap on response size BEFORE we read it into memory.
     // Catches both honest-server-too-large and slow-stream attackers.
@@ -227,7 +280,7 @@ pub(crate) fn fetch_and_convert(url: &str) -> Result<String, ToolError> {
     // from Content-Type, but most modern pages are UTF-8 anyway.
     let body = String::from_utf8_lossy(&buf).into_owned();
 
-    let markdown = if content_type.contains("text/html") || content_type.is_empty() {
+    let raw_markdown = if content_type.contains("text/html") || content_type.is_empty() {
         // Empty content-type defaults to HTML conversion — many servers
         // return text without an explicit content-type and the page is
         // still HTML-shaped.
@@ -238,7 +291,18 @@ pub(crate) fn fetch_and_convert(url: &str) -> Result<String, ToolError> {
         body
     };
 
-    Ok(truncate_to_chars(markdown, MAX_MARKDOWN_CHARS))
+    let original_chars = raw_markdown.chars().count();
+    let truncated = raw_markdown.len() > MAX_MARKDOWN_CHARS;
+    let markdown = truncate_to_chars(raw_markdown, MAX_MARKDOWN_CHARS);
+
+    Ok(FetchResult {
+        markdown,
+        final_url,
+        content_type,
+        status: status_code,
+        truncated,
+        original_chars,
+    })
 }
 
 /// Validate that the URL is http(s) and points to a non-private,
@@ -351,9 +415,10 @@ fn check_ip_allowed(ip: &IpAddr) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// Truncate at a UTF-8 char boundary, appending a marker that records
-/// the pre-truncation length so the agent (and the extraction LLM)
-/// knows content was elided.
+/// Truncate at a UTF-8 char boundary. The caller decides whether to
+/// surface a "truncated" notice — `FetchResult.truncated` and
+/// `original_chars` carry the signal so we don't have to embed magic
+/// substrings inside the returned body.
 fn truncate_to_chars(s: String, max: usize) -> String {
     if s.len() <= max {
         return s;
@@ -362,13 +427,7 @@ fn truncate_to_chars(s: String, max: usize) -> String {
     while !s.is_char_boundary(end) {
         end -= 1;
     }
-    let mut out = String::with_capacity(end + 64);
-    out.push_str(&s[..end]);
-    out.push_str(&format!(
-        "\n\n... (truncated; original was {} chars)",
-        s.len()
-    ));
-    out
+    s[..end].to_string()
 }
 
 #[cfg(test)]
@@ -381,18 +440,37 @@ mod tests {
     fn test_validate_url_rejects_ftp() {
         let err = validate_url("ftp://example.com/").unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+        // Pin the message so a future change that drops to a different
+        // error path (e.g. parse-reject vs scheme-reject) gets caught.
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("http://") && msg.contains("https://"),
+            "got: {msg}"
+        );
     }
 
     #[test]
     fn test_validate_url_rejects_schemeless() {
         let err = validate_url("//example.com").unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Invalid URL")
+                || msg.contains("relative URL without a base")
+                || msg.contains("missing scheme"),
+            "got: {msg}"
+        );
     }
 
     #[test]
     fn test_validate_url_rejects_file_scheme() {
         let err = validate_url("file:///etc/passwd").unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("http://") && msg.contains("https://"),
+            "scheme-reject message must explain why: got: {msg}"
+        );
     }
 
     #[test]
@@ -407,6 +485,11 @@ mod tests {
     fn test_validate_url_rejects_loopback_v6() {
         let err = validate_url("http://[::1]/").unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied(_)));
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("loopback"),
+            "v6 loopback message must mention loopback (recursion path used): {msg}"
+        );
     }
 
     #[test]
@@ -422,6 +505,11 @@ mod tests {
         // 169.254.169.254 — AWS / GCP / Azure metadata endpoint.
         let err = validate_url("http://169.254.169.254/latest/meta-data/").unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied(_)));
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("link-local"),
+            "metadata endpoint must be rejected via link-local rule (more general than IP-literal pin): {msg}"
+        );
     }
 
     #[test]
@@ -436,6 +524,8 @@ mod tests {
     fn test_validate_url_rejects_unspecified_v4() {
         let err = validate_url("http://0.0.0.0/").unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied(_)));
+        let msg = format!("{}", err);
+        assert!(msg.contains("0.0.0.0"), "got: {msg}");
     }
 
     #[test]
@@ -498,6 +588,8 @@ mod tests {
         // 0.0.0.0, not 0.1.2.3 etc.
         let err = validate_url("http://0.1.2.3/").unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied(_)));
+        let msg = format!("{}", err);
+        assert!(msg.contains("0.0.0.0/8"), "got: {msg}");
     }
 
     #[test]
@@ -705,11 +797,14 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_to_chars_long_truncated_with_marker() {
+    fn test_truncate_to_chars_long_truncated_clean() {
+        // truncate_to_chars now returns the prefix only — the
+        // FetchResult.truncated + original_chars flags signal
+        // truncation, no inline magic substring is embedded.
         let s = "x".repeat(40_000);
         let out = truncate_to_chars(s, 32_000);
-        assert!(out.starts_with(&"x".repeat(32_000)));
-        assert!(out.contains("(truncated; original was 40000 chars)"));
+        assert_eq!(out.len(), 32_000);
+        assert!(out.chars().all(|c| c == 'x'));
     }
 
     #[test]
@@ -728,20 +823,23 @@ mod tests {
     fn test_web_fetch_invalid_url() {
         let tool = WebFetchTool;
         let result = tool.execute(json!({"url": "not-a-url"}));
-        assert!(matches!(
-            result.unwrap_err(),
-            ToolError::InvalidArguments(_)
-        ));
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+        // Pin the message: parsing failed at the URL parser, not at
+        // the scheme/host gate. If a future refactor pushes the
+        // rejection elsewhere we want to know.
+        let msg = format!("{}", err);
+        assert!(msg.contains("Invalid URL"), "got: {msg}");
     }
 
     #[test]
     fn test_web_fetch_missing_url() {
         let tool = WebFetchTool;
         let result = tool.execute(json!({}));
-        assert!(matches!(
-            result.unwrap_err(),
-            ToolError::InvalidArguments(_)
-        ));
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+        let msg = format!("{}", err);
+        assert!(msg.contains("missing 'url'"), "got: {msg}");
     }
 
     #[test]
@@ -780,6 +878,23 @@ mod tests {
         assert!(
             desc.contains("private/loopback") || desc.contains("private") || desc.contains("loopback"),
             "description should mention the SSRF guard so the model doesn't try to fetch internal hosts"
+        );
+    }
+
+    #[test]
+    fn test_description_steers_model_to_prefer_prompt() {
+        // Regression guard for the dog-food failure mode where the
+        // model would call web_fetch(url) by default and pay the
+        // full markdown context tax — because the description didn't
+        // tell it `prompt` was the preferred form.
+        let desc = WebFetchTool.description();
+        assert!(
+            desc.contains("STRONGLY PREFER") || desc.contains("PREFER passing"),
+            "description must actively steer the model toward `prompt` for fact lookup: {desc}"
+        );
+        assert!(
+            desc.contains("32 K") || desc.contains("32K") || desc.contains("32,000"),
+            "description should mention the size budget so the model understands the cost of bare fetch: {desc}"
         );
     }
 }
