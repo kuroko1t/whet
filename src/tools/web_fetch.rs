@@ -1,6 +1,7 @@
 use super::{Tool, ToolError};
 use serde_json::json;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::io::Read;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::OnceLock;
 
 /// Hard cap on the markdown payload we return to the agent (and feed
@@ -8,7 +9,13 @@ use std::sync::OnceLock;
 /// language. Tight under q3's 8 K context window but necessary
 /// because chrome-heavy sites (Wikipedia, GitHub) easily burn 16 KB
 /// on navigation/sidebars before reaching the article body.
-pub const MAX_MARKDOWN_CHARS: usize = 32_000;
+const MAX_MARKDOWN_CHARS: usize = 32_000;
+
+/// Hard cap on the raw response body we'll read from a server before
+/// HTML→markdown conversion. 5 MB is generous for any real page and
+/// fails a slow-stream attacker quickly. Enforced both via
+/// `Content-Length` (if advertised) and via a bounded `Read::take`.
+const MAX_RESPONSE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Shared HTML→markdown converter pre-configured to drop common
 /// chrome elements (`<nav>`, `<header>`, `<footer>`, `<aside>`,
@@ -29,32 +36,74 @@ fn html_converter() -> &'static htmd::HtmlToMarkdown {
     })
 }
 
-/// Shared HTTP client. Configured with:
-///   - 30 s overall timeout.
-///   - Limited redirects (5) with per-hop SSRF re-check via the
-///     redirect policy callback.
-///   - Generic User-Agent and no automatic Referer.
-fn http_client() -> &'static reqwest::blocking::Client {
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 5 {
-                    return attempt.error("too many redirects");
-                }
-                // Re-validate every redirect target against the SSRF
-                // rules; same-policy as the initial URL gate.
-                match validate_url(attempt.url().as_str()) {
-                    Ok(()) => attempt.follow(),
-                    Err(e) => attempt.error(format!("redirect blocked: {}", e)),
-                }
-            }))
-            .user_agent("whet")
-            .referer(false)
-            .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
-    })
+/// User-Agent advertised by every outbound fetch. Versioned so server
+/// logs can correlate behaviour to a specific whet release; a bare
+/// `whet` token gets 403'd by some hardened endpoints.
+fn user_agent() -> String {
+    format!("whet/{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Build a per-fetch `reqwest::blocking::Client` with the resolved
+/// addresses pinned for `host`, so the actual TCP connect cannot
+/// re-resolve to a different IP between our SSRF validation and
+/// reqwest's connect. This closes the DNS-rebinding TOCTOU that
+/// affected the previous static-client design.
+///
+/// We deliberately `.expect()` on `.build()` rather than fall back to
+/// a default client: a default `Client::new()` would silently drop
+/// the SSRF redirect policy and the DNS pin, which is strictly
+/// less safe than refusing to fetch at all. If reqwest fails to
+/// construct a client at all, panic is the correct outcome —
+/// continuing would mean fetching with no SSRF guards.
+fn build_pinned_client(
+    host: &str,
+    addrs: &[SocketAddr],
+) -> Result<reqwest::blocking::Client, ToolError> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::custom(redirect_policy))
+        .user_agent(user_agent())
+        .referer(false)
+        .resolve_to_addrs(host, addrs)
+        .build()
+        .map_err(|e| {
+            ToolError::ExecutionFailed(format!(
+                "Failed to build HTTP client (SSRF policy could not be applied): {}",
+                e
+            ))
+        })
+}
+
+/// Redirect-policy callback factored out so it can be unit-tested
+/// without a real `reqwest::redirect::Attempt`. We reject cross-host
+/// redirects unconditionally (matches Claude Code's behaviour and
+/// avoids re-doing DNS pin for an arbitrary new host mid-flight),
+/// re-validate every target against the SSRF rules, and cap the
+/// chain at 5 hops.
+fn redirect_policy(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
+    if attempt.previous().len() >= 5 {
+        return attempt.error("too many redirects");
+    }
+    let target = attempt.url();
+    let previous = attempt.previous().last();
+    if let Some(prev) = previous {
+        if target.host_str() != prev.host_str() {
+            return attempt
+                .error("cross-host redirects are not followed (refetch the new URL explicitly)");
+        }
+    }
+    match validate_redirect_target(target.as_str()) {
+        Ok(()) => attempt.follow(),
+        Err(e) => attempt.error(format!("redirect blocked: {}", e)),
+    }
+}
+
+/// SSRF check used by the redirect-policy callback. Identical to the
+/// initial-URL gate but returns the rejection reason as a `String`
+/// (reqwest's redirect policy wants a `Box<dyn StdError + Send + Sync>`
+/// constructed from a `&str`, which String coerces to).
+fn validate_redirect_target(url: &str) -> Result<(), String> {
+    validate_url(url).map(|_| ()).map_err(|e| format!("{}", e))
 }
 
 pub struct WebFetchTool;
@@ -103,13 +152,27 @@ impl Tool for WebFetchTool {
 
 /// Fetch a URL, validate it against SSRF rules, convert the HTML body
 /// to markdown via `htmd`, and truncate to `MAX_MARKDOWN_CHARS`.
-/// Exposed `pub` so the agent loop can call it from the
+/// Exposed `pub(crate)` so the agent loop can call it from the
 /// `web_fetch + prompt` special case without duplicating the HTTP and
 /// conversion plumbing.
-pub fn fetch_and_convert(url: &str) -> Result<String, ToolError> {
-    validate_url(url)?;
+pub(crate) fn fetch_and_convert(url: &str) -> Result<String, ToolError> {
+    // Resolve + validate the URL's host once. The returned addresses
+    // are then pinned on the per-request client so reqwest's connect
+    // step uses the same IPs we just validated (closes DNS rebinding).
+    let resolved = validate_url(url)?;
 
-    let response = http_client()
+    // The host string we pin against is whatever reqwest's URL parser
+    // produces — including the `[...]` brackets for IPv6 literals.
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| ToolError::InvalidArguments(format!("Invalid URL '{}': {}", url, e)))?;
+    let host_for_pin = parsed
+        .host_str()
+        .ok_or_else(|| ToolError::InvalidArguments(format!("URL has no host: '{}'", url)))?
+        .to_string();
+
+    let client = build_pinned_client(&host_for_pin, &resolved)?;
+
+    let response = client
         .get(url)
         .send()
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to fetch URL '{}': {}", url, e)))?;
@@ -123,6 +186,17 @@ pub fn fetch_and_convert(url: &str) -> Result<String, ToolError> {
         )));
     }
 
+    // Defensive cap on response size BEFORE we read it into memory.
+    // Catches both honest-server-too-large and slow-stream attackers.
+    if let Some(declared) = response.content_length() {
+        if declared > MAX_RESPONSE_BYTES {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Response body too large: server declared {} bytes (cap {})",
+                declared, MAX_RESPONSE_BYTES
+            )));
+        }
+    }
+
     let content_type = response
         .headers()
         .get("content-type")
@@ -130,9 +204,28 @@ pub fn fetch_and_convert(url: &str) -> Result<String, ToolError> {
         .unwrap_or("")
         .to_string();
 
-    let body = response
-        .text()
-        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read response: {}", e)))?;
+    // Read at most `MAX_RESPONSE_BYTES + 1` to detect oversized
+    // bodies whose Content-Length was missing or a lie. The +1 is
+    // the trip-wire: if we actually fill it, the body was over the
+    // cap and we reject. Note: `Read::take` consumes via the
+    // blocking response's `Read` impl, which the connection-level
+    // timeout (30 s) also bounds.
+    let mut buf = Vec::with_capacity(8 * 1024);
+    response
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read response body: {}", e)))?;
+    if buf.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(ToolError::ExecutionFailed(format!(
+            "Response body exceeded {} bytes during streaming read",
+            MAX_RESPONSE_BYTES
+        )));
+    }
+
+    // Lossy UTF-8: matches the previous `response.text()` behaviour
+    // for non-UTF-8 pages. A future improvement could detect charset
+    // from Content-Type, but most modern pages are UTF-8 anyway.
+    let body = String::from_utf8_lossy(&buf).into_owned();
 
     let markdown = if content_type.contains("text/html") || content_type.is_empty() {
         // Empty content-type defaults to HTML conversion — many servers
@@ -149,10 +242,10 @@ pub fn fetch_and_convert(url: &str) -> Result<String, ToolError> {
 }
 
 /// Validate that the URL is http(s) and points to a non-private,
-/// non-loopback, non-link-local host. Resolves the hostname to a
-/// concrete IP and re-checks — DNS rebinding still possible at the
-/// TCP layer but is out of scope for v1.
-fn validate_url(url: &str) -> Result<(), ToolError> {
+/// non-loopback, non-link-local host. Returns the SocketAddrs that
+/// the host resolves to — caller pins these onto the request so the
+/// TCP connect doesn't re-resolve (DNS-rebinding mitigation).
+fn validate_url(url: &str) -> Result<Vec<SocketAddr>, ToolError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidArguments(format!("Invalid URL '{}': {}", url, e)))?;
 
@@ -168,6 +261,8 @@ fn validate_url(url: &str) -> Result<(), ToolError> {
         .host_str()
         .ok_or_else(|| ToolError::InvalidArguments(format!("URL has no host: '{}'", url)))?;
 
+    let port = parsed.port_or_known_default().unwrap_or(80);
+
     // `host_str()` wraps IPv6 literals in `[...]`. Strip the brackets
     // before attempting to parse as an `IpAddr`, otherwise the parse
     // fails and we fall through to DNS resolution of the literal
@@ -179,25 +274,25 @@ fn validate_url(url: &str) -> Result<(), ToolError> {
 
     if let Ok(ip) = candidate_ip.parse::<IpAddr>() {
         check_ip_allowed(&ip)?;
-    } else {
-        let port = parsed.port_or_known_default().unwrap_or(80);
-        let addrs = (host_str, port).to_socket_addrs().map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to resolve host '{}': {}", host_str, e))
-        })?;
-        let mut any_resolved = false;
-        for addr in addrs {
-            any_resolved = true;
-            check_ip_allowed(&addr.ip())?;
-        }
-        if !any_resolved {
-            return Err(ToolError::ExecutionFailed(format!(
-                "Host '{}' did not resolve to any address",
-                host_str
-            )));
-        }
+        return Ok(vec![SocketAddr::new(ip, port)]);
     }
 
-    Ok(())
+    let resolved: Vec<SocketAddr> = (host_str, port)
+        .to_socket_addrs()
+        .map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to resolve host '{}': {}", host_str, e))
+        })?
+        .collect();
+    if resolved.is_empty() {
+        return Err(ToolError::ExecutionFailed(format!(
+            "Host '{}' did not resolve to any address",
+            host_str
+        )));
+    }
+    for addr in &resolved {
+        check_ip_allowed(&addr.ip())?;
+    }
+    Ok(resolved)
 }
 
 /// Reject IPs that should never be fetched from a coding agent:
@@ -213,6 +308,10 @@ fn check_ip_allowed(ip: &IpAddr) -> Result<(), ToolError> {
             } else if v4.is_link_local() {
                 // also covers 169.254.169.254 (cloud metadata)
                 Some("link-local")
+            } else if v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40 {
+                // CGNAT 100.64.0.0/10 — NOT covered by `is_private()`
+                // (which only matches 10/8, 172.16/12, 192.168/16).
+                Some("CGNAT (100.64.0.0/10)")
             } else if v4.is_multicast() {
                 Some("multicast")
             } else if v4.is_unspecified() {
@@ -337,6 +436,149 @@ mod tests {
     fn test_validate_url_rejects_unspecified_v4() {
         let err = validate_url("http://0.0.0.0/").unwrap_err();
         assert!(matches!(err, ToolError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn test_validate_url_rejects_cgnat() {
+        // CGNAT 100.64.0.0/10. `Ipv4Addr::is_private()` returns
+        // false for this range, so without a dedicated check it
+        // would be reachable and could route to a hostile network.
+        let err = validate_url("http://100.64.0.1/").unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        let msg = format!("{}", err);
+        assert!(msg.contains("CGNAT"), "got: {msg}");
+        // Boundary: 100.127.255.255 still inside /10.
+        let err = validate_url("http://100.127.255.255/").unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        // 100.128.x.x is OUTSIDE /10 and should NOT be CGNAT-blocked.
+        // (It's still a public address, no other rule rejects it
+        // — DNS resolution may still error in a sandbox, but the
+        // is_path_safe-style v4 rules should pass it through.)
+        let result = validate_url("http://100.128.0.1/");
+        // If the response is an error, it must NOT be the CGNAT
+        // PermissionDenied — only an upstream resolution error is OK.
+        if let Err(ToolError::PermissionDenied(msg)) = &result {
+            assert!(
+                !msg.contains("CGNAT"),
+                "100.128.0.1 must NOT be classified as CGNAT, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_url_rejects_ipv6_mapped_loopback() {
+        // IPv4-mapped-into-IPv6: `::ffff:127.0.0.1` is the v6 spelling
+        // of the v4 loopback. Without the to_ipv4_mapped() recursion
+        // in check_ip_allowed, this would bypass the loopback rule.
+        let err = validate_url("http://[::ffff:127.0.0.1]/").unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        let msg = format!("{}", err);
+        assert!(msg.contains("loopback"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_url_rejects_ipv6_link_local() {
+        let err = validate_url("http://[fe80::1]/").unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        let msg = format!("{}", err);
+        assert!(msg.contains("link-local"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_url_rejects_ipv6_multicast() {
+        let err = validate_url("http://[ff02::1]/").unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        let msg = format!("{}", err);
+        assert!(msg.contains("multicast"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_url_rejects_zero_slash_eight() {
+        // 0.0.0.0/8 — `is_unspecified()` only catches the exact
+        // 0.0.0.0, not 0.1.2.3 etc.
+        let err = validate_url("http://0.1.2.3/").unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn test_validate_url_rejects_broadcast() {
+        let err = validate_url("http://255.255.255.255/").unwrap_err();
+        assert!(matches!(err, ToolError::PermissionDenied(_)));
+        let msg = format!("{}", err);
+        assert!(msg.contains("broadcast"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_url_returns_pinned_addrs_for_ip_literal() {
+        // validate_url's contract: for an IP literal it returns
+        // exactly one SocketAddr (the host's IP + port), and the
+        // port matches the URL's scheme default.
+        let addrs = validate_url("http://8.8.8.8:8080/").unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].port(), 8080);
+        assert_eq!(addrs[0].ip().to_string(), "8.8.8.8");
+        let addrs = validate_url("https://8.8.8.8/").unwrap();
+        assert_eq!(addrs[0].port(), 443);
+    }
+
+    // --- redirect policy ---
+
+    #[test]
+    fn test_validate_redirect_target_blocks_loopback() {
+        // The redirect-policy callback delegates to this for the
+        // SSRF re-check on every hop. If a 302 points to a private
+        // address, this must reject.
+        let err = validate_redirect_target("http://127.0.0.1/").unwrap_err();
+        assert!(err.contains("loopback"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_redirect_target_blocks_cloud_metadata() {
+        // The classic SSRF target: AWS / GCP / Azure metadata.
+        let err = validate_redirect_target("http://169.254.169.254/latest/").unwrap_err();
+        assert!(err.contains("link-local"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_redirect_target_allows_public() {
+        // Sanity: a clearly-public IP should pass the redirect gate
+        // (it can still fail at connect time but that's downstream).
+        // We accept either Ok or a non-SSRF Err (e.g. DNS resolution
+        // in a sandbox); SSRF rejection is what we explicitly
+        // forbid here.
+        let result = validate_redirect_target("http://8.8.8.8/");
+        if let Err(msg) = result {
+            assert!(
+                !msg.contains("loopback")
+                    && !msg.contains("private")
+                    && !msg.contains("link-local"),
+                "8.8.8.8 must not be SSRF-rejected: {msg}"
+            );
+        }
+    }
+
+    // --- response-size cap ---
+
+    #[test]
+    fn test_max_response_bytes_is_reasonable() {
+        // 5 MB is the documented cap. Anything substantially
+        // smaller risks rejecting common pages; substantially
+        // larger defeats the DoS guard.
+        assert_eq!(MAX_RESPONSE_BYTES, 5 * 1024 * 1024);
+    }
+
+    // --- User-Agent ---
+
+    #[test]
+    fn test_user_agent_includes_version() {
+        let ua = user_agent();
+        assert!(ua.starts_with("whet/"), "got: {ua}");
+        // Either a semver-ish number or "0.0.0"; ensures we're not
+        // sending a bare "whet" string that some servers 403.
+        assert!(
+            ua.split('/').nth(1).is_some_and(|v| !v.is_empty()),
+            "got: {ua}"
+        );
     }
 
     // --- markdown conversion (via htmd) ---
