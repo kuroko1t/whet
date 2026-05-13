@@ -70,7 +70,19 @@ pub fn format_tool_call_compact(name: &str, args: &Value) -> String {
                 format!("RepoMap({})", p)
             }
         }
-        "web_fetch" => format!("Fetch({})", truncate_arg(s("url"))),
+        "web_fetch" => {
+            let url = truncate_arg(s("url"));
+            let prompt = s("prompt");
+            if prompt.is_empty() {
+                format!("Fetch({})", url)
+            } else {
+                // Show the prompt so the user can see WHY this fetch
+                // happened — and so they understand a second (internal
+                // extraction) LLM call is about to run. Truncate the
+                // prompt aggressively; the full text is still in stats.
+                format!("Fetch({}, \"{}\")", url, truncate_arg(prompt))
+            }
+        }
         "web_search" => format!("Search({})", truncate_arg(s("query"))),
         "git" => format!("Git({})", truncate_arg(s("command"))),
         // Unknown / MCP-registered tools: keep the tool name and show a
@@ -406,12 +418,48 @@ mod tests {
             format_tool_call_compact("web_fetch", &json!({"url": "https://example.com/foo"})),
             "Fetch(https://example.com/foo)"
         );
+        // Empty prompt is treated as "no prompt" — same rendering as
+        // the no-prompt case.
+        assert_eq!(
+            format_tool_call_compact(
+                "web_fetch",
+                &json!({"url": "https://example.com/foo", "prompt": ""})
+            ),
+            "Fetch(https://example.com/foo)"
+        );
         assert_eq!(
             format_tool_call_compact(
                 "web_search",
                 &json!({"query": "rust async runtime comparison"})
             ),
             "Search(rust async runtime comparison)"
+        );
+    }
+
+    #[test]
+    fn web_fetch_with_prompt_compact_renders_prompt() {
+        // Regression guard: when web_fetch is called with a non-empty
+        // prompt, the compact rendering must surface it so the user
+        // sees the implicit second-LLM-call's question. The full
+        // prompt should appear when short, truncated when long.
+        let short = format_tool_call_compact(
+            "web_fetch",
+            &json!({"url": "https://example.com/", "prompt": "who designed Rust?"}),
+        );
+        assert!(
+            short.starts_with("Fetch(https://example.com/, "),
+            "got: {short:?}"
+        );
+        assert!(short.contains("who designed Rust?"), "got: {short:?}");
+
+        let long_prompt = "a".repeat(200);
+        let long = format_tool_call_compact(
+            "web_fetch",
+            &json!({"url": "https://example.com/", "prompt": long_prompt}),
+        );
+        assert!(
+            long.contains('…'),
+            "long prompt must be truncated: {long:?}"
         );
     }
 
