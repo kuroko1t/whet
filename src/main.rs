@@ -66,6 +66,13 @@ struct Cli {
     /// Skip all permission prompts (yolo mode)
     #[arg(short = 'y', long = "yolo")]
     yolo: bool,
+
+    /// Override the agent loop's max iterations for this invocation.
+    /// Useful for one-off research / multi-step tasks where the
+    /// `~/.whet/config.toml` default (typically 10, + 5 progress
+    /// extension) is too tight. Has no persistent effect.
+    #[arg(long = "max-iterations", value_name = "N")]
+    max_iterations: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -157,7 +164,13 @@ fn ask_approval(tool_name: &str, args: &serde_json::Value) -> bool {
     }
 }
 
-fn setup_agent(cfg: &Config, model: &str, skills: &[Skill], yolo: bool) -> Agent {
+fn setup_agent(
+    cfg: &Config,
+    model: &str,
+    skills: &[Skill],
+    yolo: bool,
+    max_iterations_override: Option<usize>,
+) -> Agent {
     let provider = create_provider(cfg, model);
     let mut registry = default_registry();
 
@@ -177,9 +190,11 @@ fn setup_agent(cfg: &Config, model: &str, skills: &[Skill], yolo: bool) -> Agent
         cfg.agent.permission_mode.clone()
     };
 
+    let max_iterations = resolve_max_iterations(cfg.agent.max_iterations, max_iterations_override);
+
     let agent_config = AgentConfig {
         model: model.to_string(),
-        max_iterations: cfg.agent.max_iterations,
+        max_iterations,
         permission_mode,
         plan_mode: false,
         context_compression: cfg.agent.context_compression,
@@ -188,6 +203,17 @@ fn setup_agent(cfg: &Config, model: &str, skills: &[Skill], yolo: bool) -> Agent
     };
 
     Agent::new(provider, registry, agent_config, skills)
+}
+
+/// Resolve the agent's `max_iterations` for this invocation. CLI flag
+/// (`--max-iterations N`) overrides the value from
+/// `~/.whet/config.toml`. The result is sanity-clamped to `[1, 200]`
+/// so a typo like `--max-iterations 1000000` can't spin a runaway loop;
+/// 200 is well beyond the practical research-task ceiling (~30–50)
+/// observed in dog-food runs, and 1 is the minimum that lets the loop
+/// run at all.
+pub(crate) fn resolve_max_iterations(config_value: usize, cli_override: Option<usize>) -> usize {
+    cli_override.unwrap_or(config_value).clamp(1, 200)
 }
 
 /// Pick the actual compaction-trigger token count, scaling with the
@@ -488,6 +514,7 @@ fn run_chat(
     continue_conv: bool,
     message: Option<String>,
     yolo: bool,
+    max_iterations_override: Option<usize>,
 ) {
     let cfg = Config::load();
     let model = model.unwrap_or(cfg.llm.model.clone());
@@ -495,7 +522,7 @@ fn run_chat(
 
     // Single-shot mode
     if let Some(msg) = message.filter(|m| !m.trim().is_empty()) {
-        let mut agent = setup_agent(&cfg, &model, &loaded_skills, yolo);
+        let mut agent = setup_agent(&cfg, &model, &loaded_skills, yolo, max_iterations_override);
         // Single-shot still benefits from persistent memory: the model
         // can `remember` facts from a one-off invocation, and recalls
         // facts from past sessions on startup.
@@ -614,7 +641,7 @@ fn run_chat(
     }
     println!("Type {} to exit.\n", "Ctrl+D".dimmed());
 
-    let mut agent = setup_agent(&cfg, &model, &loaded_skills, yolo);
+    let mut agent = setup_agent(&cfg, &model, &loaded_skills, yolo, max_iterations_override);
 
     if cfg.agent.web_enabled {
         println!("Web tools: {}", "enabled".green());
@@ -1466,7 +1493,14 @@ fn main() {
             } else {
                 Some(prompt_text)
             });
-            run_chat(cli.model, cli.resume, cli.continue_conv, message, cli.yolo);
+            run_chat(
+                cli.model,
+                cli.resume,
+                cli.continue_conv,
+                message,
+                cli.yolo,
+                cli.max_iterations,
+            );
         }
     }
 }
@@ -1507,6 +1541,48 @@ mod tests {
             },
             mcp: McpConfig::default(),
         }
+    }
+
+    #[test]
+    fn resolve_max_iterations_cli_overrides_config() {
+        // The CLI flag wins when present. Lets a single research
+        // invocation bump the cap without touching ~/.whet/config.toml.
+        assert_eq!(resolve_max_iterations(10, Some(30)), 30);
+        assert_eq!(resolve_max_iterations(10, Some(5)), 5);
+    }
+
+    #[test]
+    fn resolve_max_iterations_uses_config_when_no_cli_flag() {
+        // No CLI override → the config value is used verbatim.
+        assert_eq!(resolve_max_iterations(15, None), 15);
+        assert_eq!(resolve_max_iterations(1, None), 1);
+    }
+
+    #[test]
+    fn resolve_max_iterations_clamps_high() {
+        // Typo guard: `--max-iterations 1000000` does NOT produce a
+        // million-iteration runaway. Clamped to 200.
+        assert_eq!(resolve_max_iterations(10, Some(1_000_000)), 200);
+        // Boundary: 200 itself passes through.
+        assert_eq!(resolve_max_iterations(10, Some(200)), 200);
+        // Just past boundary: clamped to 200.
+        assert_eq!(resolve_max_iterations(10, Some(201)), 200);
+    }
+
+    #[test]
+    fn resolve_max_iterations_clamps_low() {
+        // `--max-iterations 0` would mean "the loop never runs" — not
+        // useful and trivially confusing. Clamp to 1 so the agent at
+        // least gets one iteration to produce a response.
+        assert_eq!(resolve_max_iterations(10, Some(0)), 1);
+    }
+
+    #[test]
+    fn resolve_max_iterations_clamps_config_value_too() {
+        // The clamp applies to the config-supplied value as well,
+        // protecting against a hand-edited config with a wildly large
+        // max_iterations.
+        assert_eq!(resolve_max_iterations(10_000, None), 200);
     }
 
     #[test]
