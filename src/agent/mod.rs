@@ -1128,19 +1128,14 @@ impl Agent {
             return (
                 format!(
                     "Tool skipped (duplicate query): the search \"{}\" was already issued in \
-                     this turn. Reuse the prior results rather than re-searching, or pivot to a \
-                     different angle (more specific terms, a different source site, or move on \
-                     to fetching one of the URLs you already found).",
+                     this turn. Don't repeat it — try different keywords, narrow the query to a \
+                     specific site or year, fetch one of the URLs already returned, or move on \
+                     to producing the deliverable with what you have.",
                     query
                 ),
                 ToolResultKind::Skipped,
             );
         }
-        // Record BEFORE running the tool so a network failure still
-        // counts as "asked"; otherwise a flaky DNS would let the model
-        // hammer the same query repeatedly.
-        self.searched_queries.insert(normalised);
-
         // Fall through to the generic tool dispatch (approval, risk
         // check, Tool::execute). web_search is Safe risk so no
         // approval prompt fires in default mode — the `on_approve`
@@ -1164,6 +1159,12 @@ impl Agent {
                 ToolResultKind::Failure,
             );
         }
+        // Record AFTER mode/approval gates so a denial doesn't poison
+        // future iterations (user might un-deny by switching modes).
+        // Record BEFORE execute so a flaky-DNS failure still counts as
+        // "asked"; otherwise the model could hammer the same query on
+        // network errors.
+        self.searched_queries.insert(normalised);
         match tool.execute(args.clone()) {
             Ok(output) => (output, ToolResultKind::Success),
             Err(e) => (format!("Tool error: {}", e), ToolResultKind::Failure),
@@ -3757,9 +3758,12 @@ mod tests {
 
     /// Mock web_search Tool that records every execute() invocation
     /// so dedup tests can assert "the network call was actually
-    /// skipped" rather than relying on stats alone.
+    /// skipped" rather than relying on stats alone. `risk` lets one
+    /// dedicated test (`test_web_search_dedup_does_not_record_denied_query`)
+    /// exercise the approval-denial gate.
     struct RecordingWebSearchTool {
         calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        risk: ToolRiskLevel,
     }
 
     impl crate::tools::Tool for RecordingWebSearchTool {
@@ -3778,7 +3782,7 @@ mod tests {
             Ok(format!("(mock) search results for: {q}"))
         }
         fn risk_level(&self) -> ToolRiskLevel {
-            ToolRiskLevel::Safe
+            self.risk.clone()
         }
     }
 
@@ -3789,6 +3793,7 @@ mod tests {
         let mut registry = default_registry();
         registry.register(Box::new(RecordingWebSearchTool {
             calls: calls.clone(),
+            risk: ToolRiskLevel::Safe,
         }));
         let agent = Agent::new(llm, registry, AgentConfig::default(), &[]);
         (agent, calls)
@@ -4060,6 +4065,56 @@ mod tests {
         // And stats reflect a skipped, not a failure.
         assert_eq!(agent.stats.tool_calls_failed, 0);
         assert_eq!(agent.stats.tool_calls_skipped, 1);
+    }
+
+    #[test]
+    fn test_web_search_dedup_does_not_record_denied_query() {
+        // If approval is denied (or plan-mode blocks the call), the
+        // query must NOT enter `searched_queries`. Otherwise a user
+        // who denies once would see every subsequent identical query
+        // silently skipped — even though no search has actually run.
+        // This pins that the dedup-insert lives BELOW the approval
+        // gate in `dispatch_web_search_call`.
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = default_registry();
+        registry.register(Box::new(RecordingWebSearchTool {
+            calls: calls.clone(),
+            risk: ToolRiskLevel::Moderate,
+        }));
+        let mut agent = Agent::new(
+            Box::new(MockLlm::new(vec![])),
+            registry,
+            AgentConfig {
+                permission_mode: PermissionMode::Default,
+                ..AgentConfig::default()
+            },
+            &[],
+        );
+
+        // First call: deny.
+        let mut deny_once = |_name: &str, _args: &serde_json::Value| -> bool { false };
+        let (out, kind) = agent.dispatch_web_search_call(&json!({"query": "rust"}), &mut deny_once);
+        assert!(kind.is_failure(), "denied call must be Failure, got: {out}");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "tool must not have been executed on denial"
+        );
+        assert!(
+            !agent
+                .searched_queries
+                .contains(&normalise_search_query("rust")),
+            "denied query must NOT poison the dedup set"
+        );
+
+        // Second call to the same query: approve. Must REACH execute
+        // (no silent skip from a poisoned dedup set).
+        let mut approve = |_name: &str, _args: &serde_json::Value| -> bool { true };
+        let (_out, kind) = agent.dispatch_web_search_call(&json!({"query": "rust"}), &mut approve);
+        assert!(
+            kind.is_success(),
+            "second call must reach the mock tool, not be silently skipped"
+        );
+        assert_eq!(calls.lock().unwrap().len(), 1, "mock executed exactly once");
     }
 
     #[test]
