@@ -190,6 +190,13 @@ pub struct Agent {
     /// `SubagentGuard` so a subagent doesn't inherit (or pollute) the
     /// parent's set.
     searched_queries: HashSet<String>,
+    /// Tracks `(url, normalised_prompt)` pairs already fetched via
+    /// `web_fetch` this turn. Mirror of `searched_queries` for the
+    /// fetch tool — same Skipped semantics, same per-turn / subagent
+    /// scoping. Prompt is part of the key so that fetching the same
+    /// URL with two genuinely-different extraction prompts still
+    /// executes both; only literal-duplicate calls dedup.
+    fetched_keys: HashSet<(String, String)>,
     /// When true, skip the read-before-edit check (resumed sessions lack tool call history).
     resumed: bool,
     /// Current subagent nesting depth (0 = parent, 1 = inside a subagent).
@@ -248,6 +255,7 @@ struct SubagentGuard<'a> {
     saved_memory: Vec<Message>,
     saved_read_paths: HashSet<String>,
     saved_searched_queries: HashSet<String>,
+    saved_fetched_keys: HashSet<(String, String)>,
     saved_resumed: bool,
 }
 
@@ -260,6 +268,7 @@ impl<'a> SubagentGuard<'a> {
         // context, different goal). Restored on Drop so the parent's
         // turn-local set is unaffected.
         let saved_searched_queries = std::mem::take(&mut agent.searched_queries);
+        let saved_fetched_keys = std::mem::take(&mut agent.fetched_keys);
         let saved_resumed = agent.resumed;
         agent.resumed = false;
         agent.subagent_depth += 1;
@@ -268,6 +277,7 @@ impl<'a> SubagentGuard<'a> {
             saved_memory,
             saved_read_paths,
             saved_searched_queries,
+            saved_fetched_keys,
             saved_resumed,
         }
     }
@@ -278,6 +288,7 @@ impl<'a> Drop for SubagentGuard<'a> {
         self.agent.memory = std::mem::take(&mut self.saved_memory);
         self.agent.read_paths = std::mem::take(&mut self.saved_read_paths);
         self.agent.searched_queries = std::mem::take(&mut self.saved_searched_queries);
+        self.agent.fetched_keys = std::mem::take(&mut self.saved_fetched_keys);
         self.agent.resumed = self.saved_resumed;
         // Saturating decrement just in case Drop fires twice via some
         // future refactor — we never want to wrap into usize::MAX.
@@ -379,6 +390,7 @@ impl Agent {
             stats: SessionStats::default(),
             read_paths: HashSet::new(),
             searched_queries: HashSet::new(),
+            fetched_keys: HashSet::new(),
             resumed: false,
             subagent_depth: 0,
             on_remember: None,
@@ -585,6 +597,7 @@ impl Agent {
         // sticky across turns intentionally (the model already read
         // a file in this conversation; it doesn't need to re-read).
         self.searched_queries.clear();
+        self.fetched_keys.clear();
 
         // Own the tool definitions for this turn so we can call &mut self
         // methods (e.g. run_subagent) inside the loop without conflicting
@@ -868,18 +881,12 @@ impl Agent {
                     // Special-cased — needs the on_remember callback for
                     // SQLite, which Tool::execute can't reach.
                     self.dispatch_remember_call(&tool_call.arguments)
-                } else if tool_call.name == "web_fetch"
-                    && self.tools.get("web_fetch").is_some()
-                    && tool_call
-                        .arguments
-                        .get("prompt")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|s| !s.trim().is_empty())
-                {
-                    // Special-cased — needs the agent's LLM handle for the
-                    // focused-extraction pass. Gated by registry presence
-                    // so `web_enabled = false` keeps it off.
-                    self.dispatch_web_fetch_extract(&tool_call.arguments)
+                } else if tool_call.name == "web_fetch" && self.tools.get("web_fetch").is_some() {
+                    // Special-cased — unified entry point that handles
+                    // per-turn dedup (mirroring web_search), then routes
+                    // to the LLM-extraction path when `prompt` is set or
+                    // to the generic Tool::execute path when it isn't.
+                    self.dispatch_web_fetch_call(&tool_call.arguments, on_approve)
                 } else if tool_call.name == "web_search" && self.tools.get("web_search").is_some() {
                     // Special-cased — checks the per-turn dedup set
                     // BEFORE actually running the network call. A
@@ -1171,12 +1178,92 @@ impl Agent {
         }
     }
 
+    /// Unified dispatch handler for `web_fetch`. Mirrors
+    /// `dispatch_web_search_call`: per-turn dedup via
+    /// `fetched_keys` keyed on `(url, normalised_prompt)`, and
+    /// routes to the prompt-extraction path or the generic
+    /// `Tool::execute` path depending on whether `prompt` is set.
+    /// A duplicate `(url, prompt)` returns `ToolResultKind::Skipped`
+    /// so Pattern 4 (failed-then-explain reprompt) does NOT fire on
+    /// a dedup hit — same semantics as the web_search dedup
+    /// (`dispatch_web_search_call`), which is the design template.
+    pub(crate) fn dispatch_web_fetch_call(
+        &mut self,
+        args: &serde_json::Value,
+        on_approve: &mut dyn FnMut(&str, &serde_json::Value) -> bool,
+    ) -> (String, ToolResultKind) {
+        let url_arg = args["url"].as_str().unwrap_or("").trim();
+        if url_arg.is_empty() {
+            return (
+                "Tool error: web_fetch requires a non-empty 'url' argument".to_string(),
+                ToolResultKind::Failure,
+            );
+        }
+        let prompt_arg = args["prompt"].as_str().unwrap_or("");
+        let normalised_prompt = normalise_search_query(prompt_arg);
+        let key = (url_arg.to_string(), normalised_prompt);
+        if self.fetched_keys.contains(&key) {
+            let prompt_clause = if key.1.is_empty() {
+                String::new()
+            } else {
+                " with the same extraction prompt".to_string()
+            };
+            return (
+                format!(
+                    "Tool skipped (duplicate fetch): the URL \"{}\" was already fetched in \
+                     this turn{}. Don't repeat it — try a different URL, refine the prompt \
+                     to ask for different information, or move on to producing the \
+                     deliverable with what you have.",
+                    url_arg, prompt_clause
+                ),
+                ToolResultKind::Skipped,
+            );
+        }
+
+        // Prompt-mode: route to the LLM-extraction path.
+        if !prompt_arg.trim().is_empty() {
+            let result = self.dispatch_web_fetch_extract(args);
+            // Record AFTER attempt so any pre-validation failure (empty
+            // URL etc.) doesn't poison the set, but a real fetch
+            // failure still counts as "asked" (mirrors web_search).
+            self.fetched_keys.insert(key);
+            return result;
+        }
+
+        // No-prompt path: generic Tool dispatch (approval + execute).
+        let Some(tool) = self.tools.get("web_fetch") else {
+            return (
+                "Tool error: web_fetch is not registered (web_enabled=false?)".to_string(),
+                ToolResultKind::Failure,
+            );
+        };
+        let effective_risk = tool.risk_level();
+        if self.config.plan_mode && effective_risk != ToolRiskLevel::Safe {
+            return (
+                "Tool blocked: plan mode is active (read-only). Use /plan to toggle.".to_string(),
+                ToolResultKind::Failure,
+            );
+        }
+        if self.needs_approval(effective_risk) && !on_approve("web_fetch", args) {
+            return (
+                "Tool execution denied by user.".to_string(),
+                ToolResultKind::Failure,
+            );
+        }
+        self.fetched_keys.insert(key);
+        match tool.execute(args.clone()) {
+            Ok(output) => (output, ToolResultKind::Success),
+            Err(e) => (format!("Tool error: {}", e), ToolResultKind::Failure),
+        }
+    }
+
     /// Dispatch handler for `web_fetch + prompt`. Validates inputs,
     /// fetches the URL through the shared SSRF + markdown pipeline,
     /// then runs `extract_from_page` for the focused-extraction LLM
     /// call. The caller has already gated this on
     /// `self.tools.get("web_fetch").is_some()` and on a non-empty
-    /// `prompt`, so we don't repeat those checks here.
+    /// `prompt`, so we don't repeat those checks here. Dedup is the
+    /// caller's job (`dispatch_web_fetch_call`).
     pub(crate) fn dispatch_web_fetch_extract(
         &mut self,
         args: &serde_json::Value,
@@ -4345,6 +4432,387 @@ mod tests {
             "tool result should be 'Unknown tool: web_fetch', got: {:?}",
             tool_result.content
         );
+    }
+
+    // --- web_fetch dedup (same-turn duplicate (url, prompt) guard) ---
+
+    /// Mock web_fetch Tool that records every execute() invocation
+    /// so dedup tests can assert "the network call was actually
+    /// skipped" rather than relying on stats alone. Risk level is
+    /// parameterised so one dedicated test can exercise the
+    /// approval-denial gate (mirrors `RecordingWebSearchTool`).
+    struct RecordingWebFetchTool {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        risk: ToolRiskLevel,
+    }
+
+    impl crate::tools::Tool for RecordingWebFetchTool {
+        fn name(&self) -> &str {
+            "web_fetch"
+        }
+        fn description(&self) -> &str {
+            "(mock) Fetch a URL"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "prompt": {"type": "string"}
+                },
+                "required": ["url"]
+            })
+        }
+        fn execute(&self, args: serde_json::Value) -> Result<String, crate::tools::ToolError> {
+            let u = args["url"].as_str().unwrap_or("").to_string();
+            self.calls.lock().unwrap().push(u.clone());
+            Ok(format!("(mock) fetched: {u}"))
+        }
+        fn risk_level(&self) -> ToolRiskLevel {
+            self.risk.clone()
+        }
+    }
+
+    fn make_agent_with_recording_web_fetch(
+        llm: Box<dyn LlmProvider>,
+    ) -> (Agent, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = default_registry();
+        registry.register(Box::new(RecordingWebFetchTool {
+            calls: calls.clone(),
+            risk: ToolRiskLevel::Safe,
+        }));
+        let agent = Agent::new(llm, registry, AgentConfig::default(), &[]);
+        (agent, calls)
+    }
+
+    #[test]
+    fn test_web_fetch_dedup_blocks_identical_url_same_turn() {
+        // Two no-prompt fetches of the same URL in one turn: the
+        // second must be Skipped, the mock must have executed only
+        // once.
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_fetch".to_string(),
+                    arguments: json!({"url": "https://example.com/a"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "web_fetch".to_string(),
+                    arguments: json!({"url": "https://example.com/a"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, calls) = make_agent_with_recording_web_fetch(Box::new(llm));
+        let _ = agent.process_message("fetch");
+        assert_eq!(calls.lock().unwrap().len(), 1, "mock executed exactly once");
+        assert_eq!(agent.stats.tool_calls_skipped, 1);
+        let skip_msg = agent
+            .memory
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Tool)
+            .expect("tool result message")
+            .content
+            .clone();
+        assert!(
+            skip_msg.contains("Tool skipped (duplicate fetch)"),
+            "got: {skip_msg:?}"
+        );
+    }
+
+    #[test]
+    fn test_web_fetch_dedup_keys_on_url_and_prompt() {
+        // Same URL, different prompts → both should execute (dedup
+        // key is the (url, normalised_prompt) tuple, not URL alone).
+        // Plain-fetch path is exercised; the extract path uses the
+        // same key shape and is unit-tested separately.
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_fetch".to_string(),
+                    arguments: json!({"url": "https://example.com/p"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "web_fetch".to_string(),
+                    // No-prompt then prompted: different keys, both run.
+                    // The prompt path can't run end-to-end through the
+                    // recording tool (it goes via fetch_and_convert),
+                    // so this test uses two no-prompt distinct URLs to
+                    // pin "different keys → both run" without dragging
+                    // in the extract pipeline. The (url, prompt) key
+                    // logic itself is unit-tested in
+                    // `test_web_fetch_dedup_prompt_changes_key`.
+                    arguments: json!({"url": "https://example.com/q"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, calls) = make_agent_with_recording_web_fetch(Box::new(llm));
+        let _ = agent.process_message("fetch");
+        assert_eq!(calls.lock().unwrap().len(), 2, "distinct URLs both run");
+        assert_eq!(agent.stats.tool_calls_skipped, 0);
+    }
+
+    #[test]
+    fn test_web_fetch_dedup_prompt_changes_key() {
+        // Same URL, different prompts. Both pre-populate fetched_keys
+        // via a direct call to dispatch_web_fetch_call — the second
+        // must NOT be Skipped, proving the prompt is part of the key.
+        let (mut agent, calls) =
+            make_agent_with_recording_web_fetch(Box::new(MockLlm::new(vec![])));
+        let mut approve = |_n: &str, _a: &serde_json::Value| -> bool { true };
+        let (_, k1) = agent.dispatch_web_fetch_call(
+            &json!({"url": "https://example.com/", "prompt": "extract title"}),
+            &mut approve,
+        );
+        // Prompt path returns either Success or Failure depending on
+        // whether fetch_and_convert reached the URL; we don't pin
+        // that. What we pin is: the second call below — different
+        // prompt — must reach the mock or fail without being
+        // short-circuited as Skipped.
+        let _ = k1;
+        let (_, k2) = agent.dispatch_web_fetch_call(
+            &json!({"url": "https://example.com/", "prompt": "extract authors"}),
+            &mut approve,
+        );
+        assert!(
+            !matches!(k2, ToolResultKind::Skipped),
+            "different prompt must NOT be skipped"
+        );
+        // Also: a third call with the same URL+prompt as the first
+        // MUST be skipped, confirming the key matches.
+        let (_, k3) = agent.dispatch_web_fetch_call(
+            &json!({"url": "https://example.com/", "prompt": "extract title"}),
+            &mut approve,
+        );
+        assert!(
+            matches!(k3, ToolResultKind::Skipped),
+            "identical (url, prompt) must be Skipped, got {k3:?}"
+        );
+        // The recording mock isn't on the prompt path (which goes via
+        // fetch_and_convert), so calls may be empty — we don't
+        // assert on it here.
+        let _ = calls;
+    }
+
+    #[test]
+    fn test_web_fetch_dedup_resets_between_turns() {
+        // First turn fetches URL X (recorded), second turn fetches
+        // the same X again — must execute, not skip.
+        let llm = MockLlm::new(vec![
+            // Turn 1
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_fetch".to_string(),
+                    arguments: json!({"url": "https://example.com/"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("Turn 1 done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // Turn 2 — same URL again, must execute (not skip).
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "web_fetch".to_string(),
+                    arguments: json!({"url": "https://example.com/"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("Turn 2 done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, calls) = make_agent_with_recording_web_fetch(Box::new(llm));
+        let _ = agent.process_message("turn 1");
+        let _ = agent.process_message("turn 2");
+        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert_eq!(agent.stats.tool_calls_skipped, 0);
+    }
+
+    #[test]
+    fn test_web_fetch_dedup_does_not_trigger_pattern4_reprompt() {
+        // Iter 1: fetch → success. Iter 2: fetch same URL → Skipped.
+        // Iter 3: text-only response. Pattern 4 would fire IF iter 2
+        // had been recorded as Failure (last_iter_had_failure → true
+        // + non-empty content + non-open-ended user input). Skipped
+        // must keep `iter_had_failure` false so reprompts stays 0.
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_fetch".to_string(),
+                    arguments: json!({"url": "https://example.com/x"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "web_fetch".to_string(),
+                    arguments: json!({"url": "https://example.com/x"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some(
+                    "Based on the fetch I already did, the answer is X. \
+                     Writing the deliverable now."
+                        .to_string(),
+                ),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, _) = make_agent_with_recording_web_fetch(Box::new(llm));
+        let _ = agent.process_message("fetch");
+        assert_eq!(
+            agent.stats.reprompts, 0,
+            "dedup Skipped must not trigger Pattern 4 reprompt"
+        );
+        assert_eq!(agent.stats.tool_calls_failed, 0);
+        assert_eq!(agent.stats.tool_calls_skipped, 1);
+    }
+
+    #[test]
+    fn test_web_fetch_dedup_does_not_record_denied_query() {
+        // Mirrors test_web_search_dedup_does_not_record_denied_query:
+        // a denied or plan-mode-blocked fetch must NOT poison
+        // fetched_keys, so a later approved retry of the same URL
+        // still reaches execute.
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = default_registry();
+        registry.register(Box::new(RecordingWebFetchTool {
+            calls: calls.clone(),
+            risk: ToolRiskLevel::Moderate,
+        }));
+        let mut agent = Agent::new(
+            Box::new(MockLlm::new(vec![])),
+            registry,
+            AgentConfig {
+                permission_mode: PermissionMode::Default,
+                ..AgentConfig::default()
+            },
+            &[],
+        );
+        let mut deny = |_n: &str, _a: &serde_json::Value| -> bool { false };
+        let (out, kind) =
+            agent.dispatch_web_fetch_call(&json!({"url": "https://example.com/"}), &mut deny);
+        assert!(kind.is_failure(), "denial must be Failure, got {out}");
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(
+            agent.fetched_keys.is_empty(),
+            "denied fetch must NOT poison the dedup set"
+        );
+
+        let mut approve = |_n: &str, _a: &serde_json::Value| -> bool { true };
+        let (_, kind) =
+            agent.dispatch_web_fetch_call(&json!({"url": "https://example.com/"}), &mut approve);
+        assert!(
+            kind.is_success(),
+            "second call must reach mock, not be silently skipped"
+        );
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_web_fetch_dedup_isolated_in_subagent() {
+        // Parent fetches URL X. Subagent's child loop also fetches X.
+        // The child must see a fresh dedup set so its fetch runs.
+        // After the subagent exits, the parent's set must still
+        // contain only its original entry.
+        let llm = MockLlm::new(vec![
+            // Parent iter 1: fetch X
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_fetch".to_string(),
+                    arguments: json!({"url": "https://example.com/x"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Parent iter 2: spawn subagent
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "subagent".to_string(),
+                    arguments: json!({"task": "fetch the same url"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Child iter 1: fetch X (must NOT be skipped)
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "web_fetch".to_string(),
+                    arguments: json!({"url": "https://example.com/x"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Child iter 2: finish
+            LlmResponse {
+                content: Some("child done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // Parent iter 3: finish
+            LlmResponse {
+                content: Some("parent done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, calls) = make_agent_with_recording_web_fetch(Box::new(llm));
+        let _ = agent.process_message("fetch");
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            2,
+            "subagent must NOT inherit parent's dedup set; got {:?}",
+            calls.lock().unwrap()
+        );
+        assert_eq!(agent.fetched_keys.len(), 1);
+        assert!(agent
+            .fetched_keys
+            .contains(&("https://example.com/x".to_string(), String::new())));
     }
 
     // --- extract_from_page happy / error paths (web_fetch + prompt) ---
