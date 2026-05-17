@@ -9,6 +9,45 @@ use crate::tools::ToolRegistry;
 use colored::Colorize;
 use std::collections::HashSet;
 
+/// Outcome of a single tool dispatch. The agent loop uses this to (a)
+/// route stats correctly and (b) decide whether Pattern 4 (failed-
+/// then-explain reprompt) should fire — only `Failure` flips that
+/// signal, so e.g. a duplicate `web_search` skip doesn't trigger the
+/// "fix the failure" reprompt loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolResultKind {
+    /// Tool ran and produced a usable result.
+    Success,
+    /// Tool ran (or pre-flight rejected it) and produced an error
+    /// the model should react to.
+    Failure,
+    /// Dispatch declined to run the tool because doing so would be
+    /// wasteful or duplicative (e.g. identical `web_search` query
+    /// already issued this turn). The model receives an informative
+    /// notice, but this is NOT a failure to recover from.
+    Skipped,
+}
+
+impl ToolResultKind {
+    /// Bridge for the historical `(String, bool)` API. `bool` callers
+    /// only know success / failure, so this maps cleanly.
+    pub fn from_success_bool(success: bool) -> Self {
+        if success {
+            Self::Success
+        } else {
+            Self::Failure
+        }
+    }
+
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Success)
+    }
+
+    pub fn is_failure(self) -> bool {
+        matches!(self, Self::Failure)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SessionStats {
     pub llm_calls: u64,
@@ -16,6 +55,11 @@ pub struct SessionStats {
     pub completion_tokens: u64,
     pub tool_calls_ok: u64,
     pub tool_calls_failed: u64,
+    /// Tool dispatches that were short-circuited by the harness
+    /// (e.g. dedup'd duplicate `web_search`). Counted separately so
+    /// `tool_success_rate` reflects real ok/fail behaviour and the
+    /// bench dashboards don't see phantom failures.
+    pub tool_calls_skipped: u64,
     pub text_to_tool_fallbacks: u64,
     pub reprompts: u64,
 }
@@ -31,11 +75,11 @@ impl SessionStats {
         }
     }
 
-    pub fn record_tool_call(&mut self, success: bool) {
-        if success {
-            self.tool_calls_ok += 1;
-        } else {
-            self.tool_calls_failed += 1;
+    pub fn record_tool_call(&mut self, kind: ToolResultKind) {
+        match kind {
+            ToolResultKind::Success => self.tool_calls_ok += 1,
+            ToolResultKind::Failure => self.tool_calls_failed += 1,
+            ToolResultKind::Skipped => self.tool_calls_skipped += 1,
         }
     }
 
@@ -43,6 +87,9 @@ impl SessionStats {
         self.prompt_tokens + self.completion_tokens
     }
 
+    /// Total tool dispatches counted toward the success-rate
+    /// denominator. Skipped dispatches are excluded — they didn't
+    /// run, so they aren't ok-or-fail.
     pub fn total_tool_calls(&self) -> u64 {
         self.tool_calls_ok + self.tool_calls_failed
     }
@@ -135,6 +182,14 @@ pub struct Agent {
     pub stats: SessionStats,
     /// Tracks paths that have been read via read_file, used to enforce read-before-edit.
     read_paths: HashSet<String>,
+    /// Tracks normalised `web_search` queries issued so far in the
+    /// current `process_message_full` call. Used by
+    /// `dispatch_web_search_call` to short-circuit duplicates without
+    /// repeating the network call or burning iteration budget. Cleared
+    /// at the start of each `process_message_full`; swapped clean by
+    /// `SubagentGuard` so a subagent doesn't inherit (or pollute) the
+    /// parent's set.
+    searched_queries: HashSet<String>,
     /// When true, skip the read-before-edit check (resumed sessions lack tool call history).
     resumed: bool,
     /// Current subagent nesting depth (0 = parent, 1 = inside a subagent).
@@ -192,6 +247,7 @@ struct SubagentGuard<'a> {
     agent: &'a mut Agent,
     saved_memory: Vec<Message>,
     saved_read_paths: HashSet<String>,
+    saved_searched_queries: HashSet<String>,
     saved_resumed: bool,
 }
 
@@ -199,6 +255,11 @@ impl<'a> SubagentGuard<'a> {
     fn enter(agent: &'a mut Agent, child_system_msg: Message) -> Self {
         let saved_memory = std::mem::replace(&mut agent.memory, vec![child_system_msg]);
         let saved_read_paths = std::mem::take(&mut agent.read_paths);
+        // Child gets a fresh dedup set — it may legitimately need to
+        // re-issue a query the parent already issued (different
+        // context, different goal). Restored on Drop so the parent's
+        // turn-local set is unaffected.
+        let saved_searched_queries = std::mem::take(&mut agent.searched_queries);
         let saved_resumed = agent.resumed;
         agent.resumed = false;
         agent.subagent_depth += 1;
@@ -206,6 +267,7 @@ impl<'a> SubagentGuard<'a> {
             agent,
             saved_memory,
             saved_read_paths,
+            saved_searched_queries,
             saved_resumed,
         }
     }
@@ -215,6 +277,7 @@ impl<'a> Drop for SubagentGuard<'a> {
     fn drop(&mut self) {
         self.agent.memory = std::mem::take(&mut self.saved_memory);
         self.agent.read_paths = std::mem::take(&mut self.saved_read_paths);
+        self.agent.searched_queries = std::mem::take(&mut self.saved_searched_queries);
         self.agent.resumed = self.saved_resumed;
         // Saturating decrement just in case Drop fires twice via some
         // future refactor — we never want to wrap into usize::MAX.
@@ -293,6 +356,7 @@ fn emit_session_end(path: &Option<std::path::PathBuf>, stats: &SessionStats, rea
             "completion_tokens": stats.completion_tokens,
             "tool_calls_ok": stats.tool_calls_ok,
             "tool_calls_failed": stats.tool_calls_failed,
+            "tool_calls_skipped": stats.tool_calls_skipped,
             "text_to_tool_fallbacks": stats.text_to_tool_fallbacks,
             "reprompts": stats.reprompts,
         }),
@@ -314,6 +378,7 @@ impl Agent {
             config,
             stats: SessionStats::default(),
             read_paths: HashSet::new(),
+            searched_queries: HashSet::new(),
             resumed: false,
             subagent_depth: 0,
             on_remember: None,
@@ -513,6 +578,13 @@ impl Agent {
         on_approve: &mut dyn FnMut(&str, &serde_json::Value) -> bool,
     ) -> (String, ExitReason) {
         self.memory.push(Message::user(user_input));
+
+        // Reset per-turn dedup state. A new user message is a new
+        // turn — reasking the same web_search query is legitimate
+        // when the user's question shifts focus. `read_paths` stays
+        // sticky across turns intentionally (the model already read
+        // a file in this conversation; it doesn't need to re-read).
+        self.searched_queries.clear();
 
         // Own the tool definitions for this turn so we can call &mut self
         // methods (e.g. run_subagent) inside the loop without conflicting
@@ -778,7 +850,7 @@ impl Agent {
                         !self.read_paths.contains(&Self::normalize_tool_path(p))
                     });
 
-                let (result, tool_success) = if needs_read_first {
+                let (result, result_kind) = if needs_read_first {
                     let p = tool_call.arguments["path"].as_str().unwrap_or("<unknown>");
                     (
                         format!(
@@ -786,7 +858,7 @@ impl Agent {
                          Read the file first to see its current content, then retry.",
                             p, tool_call.name
                         ),
-                        false,
+                        ToolResultKind::Failure,
                     )
                 } else if tool_call.name == "subagent" {
                     // Special-cased — needs agent state Tool::execute can't
@@ -808,6 +880,14 @@ impl Agent {
                     // focused-extraction pass. Gated by registry presence
                     // so `web_enabled = false` keeps it off.
                     self.dispatch_web_fetch_extract(&tool_call.arguments)
+                } else if tool_call.name == "web_search" && self.tools.get("web_search").is_some() {
+                    // Special-cased — checks the per-turn dedup set
+                    // BEFORE actually running the network call. A
+                    // duplicate query returns `Skipped`, which is
+                    // distinct from `Failure` so Pattern 4 (failed-
+                    // then-explain reprompt) does not fire on a dedup
+                    // hit and the search loop doesn't get extended.
+                    self.dispatch_web_search_call(&tool_call.arguments, on_approve)
                 } else if let Some(tool) = self.tools.get(&tool_call.name) {
                     // Determine effective risk level (dynamic for git)
                     let effective_risk = if tool_call.name == "git" {
@@ -822,32 +902,38 @@ impl Agent {
                         (
                             "Tool blocked: plan mode is active (read-only). Use /plan to toggle."
                                 .to_string(),
-                            false,
+                            ToolResultKind::Failure,
                         )
                     } else if self.needs_approval(effective_risk) {
                         if !on_approve(&tool_call.name, &tool_call.arguments) {
-                            ("Tool execution denied by user.".to_string(), false)
+                            (
+                                "Tool execution denied by user.".to_string(),
+                                ToolResultKind::Failure,
+                            )
                         } else {
                             match tool.execute(tool_call.arguments.clone()) {
-                                Ok(output) => (output, true),
-                                Err(e) => (format!("Tool error: {}", e), false),
+                                Ok(output) => (output, ToolResultKind::Success),
+                                Err(e) => (format!("Tool error: {}", e), ToolResultKind::Failure),
                             }
                         }
                     } else {
                         match tool.execute(tool_call.arguments.clone()) {
-                            Ok(output) => (output, true),
-                            Err(e) => (format!("Tool error: {}", e), false),
+                            Ok(output) => (output, ToolResultKind::Success),
+                            Err(e) => (format!("Tool error: {}", e), ToolResultKind::Failure),
                         }
                     }
                 } else {
-                    (format!("Unknown tool: {}", tool_call.name), false)
+                    (
+                        format!("Unknown tool: {}", tool_call.name),
+                        ToolResultKind::Failure,
+                    )
                 };
 
-                self.stats.record_tool_call(tool_success);
-                if !tool_success {
+                self.stats.record_tool_call(result_kind);
+                if result_kind.is_failure() {
                     iter_had_failure = true;
                 }
-                if tool_success {
+                if result_kind.is_success() {
                     last_progress_iter = iteration;
                     if is_read_only_tool(&tool_call.name) {
                         has_read = true;
@@ -880,7 +966,12 @@ impl Agent {
                         "event": "tool_call",
                         "name": tool_call.name,
                         "args": tool_call.arguments,
-                        "ok": tool_success,
+                        "ok": result_kind.is_success(),
+                        "kind": match result_kind {
+                            ToolResultKind::Success => "success",
+                            ToolResultKind::Failure => "failure",
+                            ToolResultKind::Skipped => "skipped",
+                        },
                     }),
                 );
 
@@ -947,12 +1038,12 @@ impl Agent {
         args: &serde_json::Value,
         on_token: &mut dyn FnMut(&str),
         on_approve: &mut dyn FnMut(&str, &serde_json::Value) -> bool,
-    ) -> (String, bool) {
+    ) -> (String, ToolResultKind) {
         let task = args["task"].as_str().unwrap_or("");
         if task.is_empty() {
             return (
                 "Tool error: subagent requires a non-empty 'task' argument".to_string(),
-                false,
+                ToolResultKind::Failure,
             );
         }
         let context = args["context"].as_str().unwrap_or("");
@@ -965,8 +1056,8 @@ impl Agent {
             // Structural classification via ExitReason — an LlmError or
             // MaxIterations marks the call as failed for parent stats
             // and the parent model's view, no string-prefix heuristic.
-            Ok((text, reason)) => (text, reason.is_success()),
-            Err(e) => (format!("Tool error: {}", e), false),
+            Ok((text, reason)) => (text, ToolResultKind::from_success_bool(reason.is_success())),
+            Err(e) => (format!("Tool error: {}", e), ToolResultKind::Failure),
         }
     }
 
@@ -975,18 +1066,21 @@ impl Agent {
     /// SQLite store. Surfaces a clear error when the callback isn't
     /// wired (memory-disabled runs, isolated tests) so the model
     /// doesn't think the fact was saved.
-    pub(crate) fn dispatch_remember_call(&self, args: &serde_json::Value) -> (String, bool) {
+    pub(crate) fn dispatch_remember_call(
+        &self,
+        args: &serde_json::Value,
+    ) -> (String, ToolResultKind) {
         let content = args["content"].as_str().unwrap_or("");
         if content.trim().is_empty() {
             return (
                 "Tool error: remember requires a non-empty 'content' argument".to_string(),
-                false,
+                ToolResultKind::Failure,
             );
         }
         let Some(cb) = self.on_remember.as_ref() else {
             return (
                 "Tool error: persistent memory is not configured for this session".to_string(),
-                false,
+                ToolResultKind::Failure,
             );
         };
         match cb(content) {
@@ -994,12 +1088,86 @@ impl Agent {
                 format!(
                     "Remembered (id={id}). This fact will appear in future sessions for this project."
                 ),
-                true,
+                ToolResultKind::Success,
             ),
             Err(e) => (
                 format!("Tool error: failed to persist memory: {}", e),
-                false,
+                ToolResultKind::Failure,
             ),
+        }
+    }
+
+    /// Dispatch handler for `web_search`. Same-turn dedup: if an
+    /// identical normalised query has already been issued in this
+    /// `process_message_full` call, skip the network call and return
+    /// `ToolResultKind::Skipped` so Pattern 4 (failed-then-explain
+    /// reprompt) does NOT fire and the search loop doesn't get
+    /// extended. The agent's per-turn state is reset at the top of
+    /// `process_message_full`, and swapped clean by `SubagentGuard`
+    /// for child loops.
+    ///
+    /// Normalisation: trim + lowercase + collapse internal whitespace.
+    /// Deliberately exact-match (no fuzzy / no paraphrase); only the
+    /// literal-identical query case fires here, which is the
+    /// dog-food failure mode observed on q3 (3× repetition of the
+    /// same string).
+    pub(crate) fn dispatch_web_search_call(
+        &mut self,
+        args: &serde_json::Value,
+        on_approve: &mut dyn FnMut(&str, &serde_json::Value) -> bool,
+    ) -> (String, ToolResultKind) {
+        let query = args["query"].as_str().unwrap_or("");
+        if query.trim().is_empty() {
+            return (
+                "Tool error: web_search requires a non-empty 'query' argument".to_string(),
+                ToolResultKind::Failure,
+            );
+        }
+        let normalised = normalise_search_query(query);
+        if self.searched_queries.contains(&normalised) {
+            return (
+                format!(
+                    "Tool skipped (duplicate query): the search \"{}\" was already issued in \
+                     this turn. Don't repeat it — try different keywords, narrow the query to a \
+                     specific site or year, fetch one of the URLs already returned, or move on \
+                     to producing the deliverable with what you have.",
+                    query
+                ),
+                ToolResultKind::Skipped,
+            );
+        }
+        // Fall through to the generic tool dispatch (approval, risk
+        // check, Tool::execute). web_search is Safe risk so no
+        // approval prompt fires in default mode — the `on_approve`
+        // pass-through is for completeness in case that changes.
+        let Some(tool) = self.tools.get("web_search") else {
+            return (
+                "Tool error: web_search is not registered (web_enabled=false?)".to_string(),
+                ToolResultKind::Failure,
+            );
+        };
+        let effective_risk = tool.risk_level();
+        if self.config.plan_mode && effective_risk != ToolRiskLevel::Safe {
+            return (
+                "Tool blocked: plan mode is active (read-only). Use /plan to toggle.".to_string(),
+                ToolResultKind::Failure,
+            );
+        }
+        if self.needs_approval(effective_risk) && !on_approve("web_search", args) {
+            return (
+                "Tool execution denied by user.".to_string(),
+                ToolResultKind::Failure,
+            );
+        }
+        // Record AFTER mode/approval gates so a denial doesn't poison
+        // future iterations (user might un-deny by switching modes).
+        // Record BEFORE execute so a flaky-DNS failure still counts as
+        // "asked"; otherwise the model could hammer the same query on
+        // network errors.
+        self.searched_queries.insert(normalised);
+        match tool.execute(args.clone()) {
+            Ok(output) => (output, ToolResultKind::Success),
+            Err(e) => (format!("Tool error: {}", e), ToolResultKind::Failure),
         }
     }
 
@@ -1012,17 +1180,17 @@ impl Agent {
     pub(crate) fn dispatch_web_fetch_extract(
         &mut self,
         args: &serde_json::Value,
-    ) -> (String, bool) {
+    ) -> (String, ToolResultKind) {
         let url_arg = args["url"].as_str().unwrap_or("");
         let prompt_arg = args["prompt"].as_str().unwrap_or("");
         if url_arg.is_empty() {
             return (
                 "Tool error: web_fetch requires a non-empty 'url' argument".to_string(),
-                false,
+                ToolResultKind::Failure,
             );
         }
         match crate::tools::web_fetch::fetch_and_convert(url_arg) {
-            Err(e) => (format!("Tool error: {}", e), false),
+            Err(e) => (format!("Tool error: {}", e), ToolResultKind::Failure),
             Ok(result) => self.extract_from_page(&result, prompt_arg),
         }
     }
@@ -1043,7 +1211,7 @@ impl Agent {
         &mut self,
         result: &crate::tools::web_fetch::FetchResult,
         prompt_arg: &str,
-    ) -> (String, bool) {
+    ) -> (String, ToolResultKind) {
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let begin = format!("---BEGIN-PAGE-{nonce}---");
         let end = format!("---END-PAGE-{nonce}---");
@@ -1091,10 +1259,13 @@ impl Agent {
                              returning fetched page content as fallback]\n\n\
                              {markdown}\n\n[source: {url}]"
                         ),
-                        true,
+                        ToolResultKind::Success,
                     )
                 } else {
-                    (format!("{answer}\n\n[source: {url}]"), true)
+                    (
+                        format!("{answer}\n\n[source: {url}]"),
+                        ToolResultKind::Success,
+                    )
                 }
             }
             Err(e) => (
@@ -1106,7 +1277,7 @@ impl Agent {
                      returning fetched page content as fallback]\n\n\
                      {markdown}\n\n[source: {url}]"
                 ),
-                true,
+                ToolResultKind::Success,
             ),
         }
     }
@@ -1175,6 +1346,23 @@ impl Agent {
             }
         }
     }
+}
+
+/// Normalise a `web_search` query for same-turn dedup tracking.
+/// Trim + lowercase + collapse runs of internal whitespace, all of
+/// which are search-engine-equivalent. Deliberately stops short of
+/// punctuation stripping / stemming / paraphrase detection: the
+/// observed q3 failure mode is literal-identical repetition, and
+/// broader fuzzy matching would risk blocking legitimate
+/// refinements ("rust async" → "rust async traits" should not
+/// dedup).
+pub(crate) fn normalise_search_query(query: &str) -> String {
+    query
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Check if text content looks like the model is asking a question instead of acting.
@@ -1373,6 +1561,7 @@ mod tests {
     use super::*;
     use crate::llm::{LlmError, LlmResponse, Role, TokenUsage, ToolCall, ToolDefinition};
     use crate::tools::default_registry;
+    use serde_json::json;
     use std::cell::RefCell;
 
     /// A mock LLM that returns pre-scripted responses in sequence.
@@ -2918,14 +3107,33 @@ mod tests {
     #[test]
     fn test_session_stats_record_tool_call() {
         let mut stats = SessionStats::default();
-        stats.record_tool_call(true);
-        stats.record_tool_call(true);
-        stats.record_tool_call(false);
+        stats.record_tool_call(ToolResultKind::Success);
+        stats.record_tool_call(ToolResultKind::Success);
+        stats.record_tool_call(ToolResultKind::Failure);
         assert_eq!(stats.tool_calls_ok, 2);
         assert_eq!(stats.tool_calls_failed, 1);
+        assert_eq!(stats.tool_calls_skipped, 0);
         assert_eq!(stats.total_tool_calls(), 3);
         let rate = stats.tool_success_rate().unwrap();
         assert!((rate - 66.67).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_session_stats_skipped_excluded_from_success_rate() {
+        // Skipped dispatches must not pollute the success-rate metric
+        // used by bench dashboards — they didn't run, so they aren't
+        // ok-or-fail.
+        let mut stats = SessionStats::default();
+        stats.record_tool_call(ToolResultKind::Success);
+        stats.record_tool_call(ToolResultKind::Skipped);
+        stats.record_tool_call(ToolResultKind::Skipped);
+        assert_eq!(stats.tool_calls_ok, 1);
+        assert_eq!(stats.tool_calls_failed, 0);
+        assert_eq!(stats.tool_calls_skipped, 2);
+        assert_eq!(stats.total_tool_calls(), 1);
+        // 100% — skipped not in denominator.
+        let rate = stats.tool_success_rate().unwrap();
+        assert!((rate - 100.0).abs() < 0.01);
     }
 
     #[test]
@@ -3546,6 +3754,439 @@ mod tests {
         );
     }
 
+    // --- web_search dedup (same-turn duplicate query guard) ---
+
+    /// Mock web_search Tool that records every execute() invocation
+    /// so dedup tests can assert "the network call was actually
+    /// skipped" rather than relying on stats alone. `risk` lets one
+    /// dedicated test (`test_web_search_dedup_does_not_record_denied_query`)
+    /// exercise the approval-denial gate.
+    struct RecordingWebSearchTool {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        risk: ToolRiskLevel,
+    }
+
+    impl crate::tools::Tool for RecordingWebSearchTool {
+        fn name(&self) -> &str {
+            "web_search"
+        }
+        fn description(&self) -> &str {
+            "(mock) Search the web"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]})
+        }
+        fn execute(&self, args: serde_json::Value) -> Result<String, crate::tools::ToolError> {
+            let q = args["query"].as_str().unwrap_or("").to_string();
+            self.calls.lock().unwrap().push(q.clone());
+            Ok(format!("(mock) search results for: {q}"))
+        }
+        fn risk_level(&self) -> ToolRiskLevel {
+            self.risk.clone()
+        }
+    }
+
+    fn make_agent_with_recording_web_search(
+        llm: Box<dyn LlmProvider>,
+    ) -> (Agent, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = default_registry();
+        registry.register(Box::new(RecordingWebSearchTool {
+            calls: calls.clone(),
+            risk: ToolRiskLevel::Safe,
+        }));
+        let agent = Agent::new(llm, registry, AgentConfig::default(), &[]);
+        (agent, calls)
+    }
+
+    #[test]
+    fn test_normalise_search_query_handles_case_and_whitespace() {
+        assert_eq!(normalise_search_query("Rust Async"), "rust async");
+        assert_eq!(normalise_search_query("  rust   async  "), "rust async");
+        assert_eq!(
+            normalise_search_query("rust\tasync\nawait"),
+            "rust async await"
+        );
+        assert_eq!(normalise_search_query("RUST"), "rust");
+    }
+
+    #[test]
+    fn test_web_search_dedup_blocks_identical_query_same_turn() {
+        // Setup: model issues `web_search query="rust ownership"`
+        // twice in the same turn. Mock tool should be invoked ONCE;
+        // the second call short-circuits to Skipped with an
+        // informative notice.
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "rust ownership"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "rust ownership"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("Done.".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, mock_calls) = make_agent_with_recording_web_search(Box::new(llm));
+        let _ = agent.process_message("find me info on rust ownership");
+        // Mock tool received exactly ONE call.
+        assert_eq!(mock_calls.lock().unwrap().len(), 1);
+        // Stats reflect: 1 success, 0 failures, 1 skip.
+        assert_eq!(agent.stats.tool_calls_ok, 1);
+        assert_eq!(agent.stats.tool_calls_failed, 0);
+        assert_eq!(agent.stats.tool_calls_skipped, 1);
+        // The second tool result message contains the dedup notice.
+        let skip_msg = agent
+            .memory
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .nth(1)
+            .expect("should have 2nd tool result")
+            .content
+            .clone();
+        assert!(
+            skip_msg.contains("Tool skipped (duplicate query)"),
+            "got: {skip_msg:?}"
+        );
+    }
+
+    #[test]
+    fn test_web_search_dedup_normalises_case_and_whitespace() {
+        // First call uses `"Rust Ownership"`, second uses `"  rust   ownership "`.
+        // They normalise to the same key → second is deduped.
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "Rust Ownership"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "  rust   ownership "}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, mock_calls) = make_agent_with_recording_web_search(Box::new(llm));
+        let _ = agent.process_message("search");
+        assert_eq!(mock_calls.lock().unwrap().len(), 1);
+        assert_eq!(agent.stats.tool_calls_skipped, 1);
+    }
+
+    #[test]
+    fn test_web_search_dedup_distinct_queries_both_execute() {
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "rust async"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "go channels"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, mock_calls) = make_agent_with_recording_web_search(Box::new(llm));
+        let _ = agent.process_message("search");
+        assert_eq!(mock_calls.lock().unwrap().len(), 2);
+        assert_eq!(agent.stats.tool_calls_skipped, 0);
+    }
+
+    #[test]
+    fn test_web_search_dedup_resets_between_turns() {
+        // Same query in two SEPARATE process_message calls should
+        // both reach the mock — per-turn reset is the load-bearing
+        // guarantee for interactive sessions where the model
+        // legitimately reasks across turns.
+        let llm = MockLlm::new(vec![
+            // turn 1: search + text
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "rust"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("turn1 done".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // turn 2: same query + text
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "rust"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("turn2 done".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, mock_calls) = make_agent_with_recording_web_search(Box::new(llm));
+        let _ = agent.process_message("first user message");
+        let _ = agent.process_message("second user message");
+        // Both turns reached the mock — dedup state was reset at the
+        // start of process_message #2.
+        assert_eq!(mock_calls.lock().unwrap().len(), 2);
+        assert_eq!(agent.stats.tool_calls_skipped, 0);
+    }
+
+    #[test]
+    fn test_web_search_dedup_ignores_max_results_in_key() {
+        // Documented behaviour: only `query` participates in the
+        // dedup key. Issuing the same query with a different
+        // `max_results` is still deduped.
+        let llm = MockLlm::new(vec![
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "rust", "max_results": 5}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "rust", "max_results": 10}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: Some("ok".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, mock_calls) = make_agent_with_recording_web_search(Box::new(llm));
+        let _ = agent.process_message("search");
+        assert_eq!(mock_calls.lock().unwrap().len(), 1);
+        assert_eq!(agent.stats.tool_calls_skipped, 1);
+    }
+
+    #[test]
+    fn test_web_search_dedup_does_not_trigger_pattern4_reprompt() {
+        // Critical correctness test: if dedup used `ToolResultKind::Failure`
+        // (or the old `tool_success = false`), `iter_had_failure` would
+        // flip and Pattern 4 (failed-then-explain reprompt) would fire
+        // on the NEXT iteration if the model emitted text — making the
+        // loop LONGER, not shorter. The enum's `Skipped` variant must
+        // leave `iter_had_failure` untouched. This test pins that.
+        let llm = MockLlm::new(vec![
+            // Iter 1: duplicate-rejected search — Skipped.
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "rust"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "rust"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Iter 3: model emits text-only "I'll explain instead"
+            // shape that would trigger Pattern 4 IF a prior failure
+            // had been recorded.
+            LlmResponse {
+                content: Some(
+                    "Based on the prior result, the answer is X. I'll write the deliverable now."
+                        .to_string(),
+                ),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, _) = make_agent_with_recording_web_search(Box::new(llm));
+        let _ = agent.process_message("search");
+        // Pattern 4 must NOT have fired — reprompts count stays 0.
+        assert_eq!(
+            agent.stats.reprompts, 0,
+            "dedup Skipped must not trigger Pattern 4 reprompt"
+        );
+        // And stats reflect a skipped, not a failure.
+        assert_eq!(agent.stats.tool_calls_failed, 0);
+        assert_eq!(agent.stats.tool_calls_skipped, 1);
+    }
+
+    #[test]
+    fn test_web_search_dedup_does_not_record_denied_query() {
+        // If approval is denied (or plan-mode blocks the call), the
+        // query must NOT enter `searched_queries`. Otherwise a user
+        // who denies once would see every subsequent identical query
+        // silently skipped — even though no search has actually run.
+        // This pins that the dedup-insert lives BELOW the approval
+        // gate in `dispatch_web_search_call`.
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = default_registry();
+        registry.register(Box::new(RecordingWebSearchTool {
+            calls: calls.clone(),
+            risk: ToolRiskLevel::Moderate,
+        }));
+        let mut agent = Agent::new(
+            Box::new(MockLlm::new(vec![])),
+            registry,
+            AgentConfig {
+                permission_mode: PermissionMode::Default,
+                ..AgentConfig::default()
+            },
+            &[],
+        );
+
+        // First call: deny.
+        let mut deny_once = |_name: &str, _args: &serde_json::Value| -> bool { false };
+        let (out, kind) = agent.dispatch_web_search_call(&json!({"query": "rust"}), &mut deny_once);
+        assert!(kind.is_failure(), "denied call must be Failure, got: {out}");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "tool must not have been executed on denial"
+        );
+        assert!(
+            !agent
+                .searched_queries
+                .contains(&normalise_search_query("rust")),
+            "denied query must NOT poison the dedup set"
+        );
+
+        // Second call to the same query: approve. Must REACH execute
+        // (no silent skip from a poisoned dedup set).
+        let mut approve = |_name: &str, _args: &serde_json::Value| -> bool { true };
+        let (_out, kind) = agent.dispatch_web_search_call(&json!({"query": "rust"}), &mut approve);
+        assert!(
+            kind.is_success(),
+            "second call must reach the mock tool, not be silently skipped"
+        );
+        assert_eq!(calls.lock().unwrap().len(), 1, "mock executed exactly once");
+    }
+
+    #[test]
+    fn test_web_search_dedup_isolated_in_subagent() {
+        // Parent issues "shared-query" in turn. Then parent dispatches
+        // a subagent whose child loop ALSO issues "shared-query". The
+        // child must see a fresh dedup set (so its query reaches the
+        // mock); after the subagent returns, the parent's
+        // searched_queries must still contain only the parent's
+        // original entry (not polluted by the child's).
+        let llm = MockLlm::new(vec![
+            // Parent iter 1: search "shared-query"
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "1".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "shared-query"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Parent iter 2: dispatch subagent
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "2".to_string(),
+                    name: "subagent".to_string(),
+                    arguments: json!({"task": "child task"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Child iter 1: search same query — must reach mock
+            // because child has its own set.
+            LlmResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "3".to_string(),
+                    name: "web_search".to_string(),
+                    arguments: json!({"query": "shared-query"}),
+                }],
+                usage: TokenUsage::default(),
+            },
+            // Child finishes
+            LlmResponse {
+                content: Some("child done".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+            // Parent finishes
+            LlmResponse {
+                content: Some("parent done".to_string()),
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            },
+        ]);
+        let (mut agent, mock_calls) = make_agent_with_recording_web_search(Box::new(llm));
+        let _ = agent.process_message("parent");
+        // 2 distinct mock invocations: 1 from parent + 1 from child.
+        // If the child inherited the parent's set, the child's
+        // search would be deduped and only 1 call would land.
+        assert_eq!(
+            mock_calls.lock().unwrap().len(),
+            2,
+            "subagent must NOT inherit the parent's dedup set: got {:?}",
+            mock_calls.lock().unwrap()
+        );
+        // Parent's searched_queries set was restored on subagent exit
+        // and contains only the parent's entry.
+        assert_eq!(agent.searched_queries.len(), 1);
+        assert!(agent.searched_queries.contains("shared-query"));
+    }
+
     // --- web_fetch + prompt (LLM-extraction special case) ---
 
     #[test]
@@ -3778,8 +4419,8 @@ mod tests {
             truncated: false,
             original_chars: 14,
         };
-        let (text, ok) = agent.extract_from_page(&fetch, "What's the title?");
-        assert!(ok, "extraction should succeed");
+        let (text, kind) = agent.extract_from_page(&fetch, "What's the title?");
+        assert!(kind.is_success(), "extraction should succeed");
         assert!(text.starts_with("The answer is 42."), "got: {:?}", text);
         assert!(
             text.ends_with("[source: https://example.com/foo]"),
@@ -3888,10 +4529,10 @@ mod tests {
             truncated: false,
             original_chars: 13,
         };
-        let (text, ok) = agent.extract_from_page(&fetch, "q");
+        let (text, kind) = agent.extract_from_page(&fetch, "q");
         assert!(
-            ok,
-            "fallback must mark ok=true so the agent uses the result"
+            kind.is_success(),
+            "fallback must mark Success so the agent uses the result"
         );
         assert!(text.starts_with("[notice:"), "got: {text:?}");
         assert!(
@@ -3924,8 +4565,8 @@ mod tests {
             truncated: false,
             original_chars: 13,
         };
-        let (text, ok) = agent.extract_from_page(&fetch, "q");
-        assert!(ok, "LLM-failure fallback must mark ok=true");
+        let (text, kind) = agent.extract_from_page(&fetch, "q");
+        assert!(kind.is_success(), "LLM-failure fallback must mark Success");
         assert!(text.starts_with("[notice:"), "got: {text:?}");
         assert!(text.contains("extraction LLM call failed"), "got: {text:?}");
         assert!(

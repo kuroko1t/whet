@@ -490,11 +490,18 @@ fn print_session_stats(stats: &SessionStats) {
     eprintln!("  Completion tokens:  {}", stats.completion_tokens);
     eprintln!("  Total tokens:       {}", stats.total_tokens());
     let total_tools = stats.total_tool_calls();
-    if total_tools > 0 {
-        eprintln!(
-            "  Tool calls:         {} ({} ok / {} failed)",
-            total_tools, stats.tool_calls_ok, stats.tool_calls_failed
-        );
+    if total_tools > 0 || stats.tool_calls_skipped > 0 {
+        if stats.tool_calls_skipped > 0 {
+            eprintln!(
+                "  Tool calls:         {} ({} ok / {} failed / {} skipped)",
+                total_tools, stats.tool_calls_ok, stats.tool_calls_failed, stats.tool_calls_skipped,
+            );
+        } else {
+            eprintln!(
+                "  Tool calls:         {} ({} ok / {} failed)",
+                total_tools, stats.tool_calls_ok, stats.tool_calls_failed
+            );
+        }
         if let Some(rate) = stats.tool_success_rate() {
             eprintln!("  Tool success rate:  {:.0}%", rate);
         }
